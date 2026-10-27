@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JARVIS X1 - Holographic Neural Orb</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: #02050a;
+      overflow: hidden;
+      font-family: "Courier New", Courier, monospace;
+      color: #00f0ff;
+      user-select: none;
+    }
+
+    #webgl-container {
+      position: fixed;
+      inset: 0;
+      cursor: grab;
+      z-index: 1;
+    }
+
+    #webgl-container:active {
+      cursor: grabbing;
+    }
+
+    /* Ambient Film Grain */
+    .overlay-grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+      opacity: 0.05;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 150px;
+      mix-blend-mode: screen;
+    }
+
+    /* Scanlines */
+    .overlay-scanlines {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 11;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 2px,
+        rgba(0, 10, 30, 0.25) 2px,
+        rgba(0, 10, 30, 0.25) 4px
+      );
+      opacity: 0.35;
+    }
+
+    /* Vignette Glow */
+    .overlay-vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9;
+      background: radial-gradient(
+        ellipse at center,
+        transparent 35%,
+        rgba(2, 6, 16, 0.85) 100%
+      );
+    }
+
+    /* Top HUD Header */
+    .hud-header {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      z-index: 20;
+      pointer-events: none;
+    }
+
+    .hud-title {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: 0.36em;
+      color: #00f0ff;
+      text-shadow: 0 0 12px rgba(0, 240, 255, 0.9), 0 0 25px rgba(0, 136, 255, 0.6);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .hud-pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #00f0ff;
+      box-shadow: 0 0 10px #00f0ff;
+      animation: pulse 2s infinite ease-in-out;
+    }
+
+    .hud-subtitle {
+      font-size: 10px;
+      letter-spacing: 0.22em;
+      color: #0088ff;
+      opacity: 0.85;
+      margin-top: 4px;
+      text-shadow: 0 0 8px rgba(0, 136, 255, 0.6);
+    }
+
+    .hud-line {
+      margin-top: 8px;
+      width: 170px;
+      height: 1.5px;
+      background: linear-gradient(to right, rgba(0, 240, 255, 0.9), rgba(0, 136, 255, 0.3), transparent);
+    }
+
+    /* Top Right Telemetry */
+    .hud-status {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      z-index: 20;
+      text-align: right;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      color: #00a2ff;
+      opacity: 0.8;
+      pointer-events: none;
+      text-shadow: 0 0 8px rgba(0, 162, 255, 0.5);
+      line-height: 1.6;
+    }
+
+    /* Bottom Left Hints */
+    .hud-hint {
+      position: fixed;
+      bottom: 24px;
+      left: 24px;
+      z-index: 20;
+      font-size: 11px;
+      line-height: 1.8;
+      letter-spacing: 0.1em;
+      color: rgba(0, 240, 255, 0.7);
+      text-shadow: 0 0 8px rgba(0, 240, 255, 0.4);
+      pointer-events: none;
+    }
+
+    .hud-hint .key {
+      display: inline-block;
+      padding: 1px 6px;
+      border: 1px solid rgba(0, 240, 255, 0.45);
+      border-radius: 3px;
+      margin-right: 4px;
+      font-size: 10px;
+      color: #00f0ff;
+      background: rgba(0, 136, 255, 0.15);
+    }
+
+    /* Bottom Right Camera & Gesture HUD */
+    .gesture-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+    }
+
+    .camera-box {
+      position: relative;
+      width: 190px;
+      height: 140px;
+      border: 1px solid rgba(0, 240, 255, 0.5);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #030814;
+      box-shadow: 0 0 16px rgba(0, 240, 255, 0.2);
+      display: none;
+    }
+
+    .camera-box.active {
+      display: block;
+    }
+
+    .camera-video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+      opacity: 0.75;
+      filter: saturate(1.8) hue-rotate(170deg) contrast(1.2);
+    }
+
+    .camera-overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    .camera-badge {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 4px 6px;
+      font-size: 9px;
+      letter-spacing: 0.15em;
+      color: #d5f8ff;
+      background: rgba(0, 20, 50, 0.85);
+      text-shadow: 0 0 6px rgba(0, 240, 255, 0.8);
+      text-align: center;
+      font-weight: 700;
+    }
+
+    .gesture-toggle-btn {
+      padding: 8px 14px;
+      background: rgba(0, 30, 70, 0.55);
+      border: 1px solid rgba(0, 240, 255, 0.5);
+      border-radius: 4px;
+      color: #00f0ff;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      text-shadow: 0 0 8px rgba(0, 240, 255, 0.7);
+      box-shadow: 0 0 12px rgba(0, 136, 255, 0.2) inset;
+      transition: all 0.2s ease;
+    }
+
+    .gesture-toggle-btn:hover {
+      background: rgba(0, 80, 160, 0.75);
+      border-color: #00f0ff;
+      box-shadow: 0 0 16px rgba(0, 240, 255, 0.5);
+    }
+
+    .gesture-toggle-btn.active {
+      background: rgba(0, 120, 220, 0.4);
+      border-color: #d5f8ff;
+      color: #d5f8ff;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.3; transform: scale(0.9); }
+      50% { opacity: 1; transform: scale(1.2); }
+    }
+  </style>
+
+  <!-- Three.js + Postprocessing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+
+  <!-- MediaPipe Tasks-Vision for Hand Tracking Gestures -->
+  <script type="module">
+    import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35";
+    window.FilesetResolver = FilesetResolver;
+    window.HandLandmarker = HandLandmarker;
+    window.dispatchEvent(new Event("mediapipe-ready"));
+  </script>
+</head>
+<body>
+  <div id="webgl-container"></div>
+
+  <div class="overlay-vignette"></div>
+  <div class="overlay-grain"></div>
+  <div class="overlay-scanlines"></div>
+
+  <!-- HUD Title -->
+  <div class="hud-header">
+    <div class="hud-title">
+      <div class="hud-pulse-dot"></div>
+      JARVIS
+    </div>
+    <div class="hud-subtitle">QUANTUM HOLOGRAPHIC INTERFACE</div>
+    <div class="hud-line"></div>
+  </div>
+
+  <!-- Top Right Telemetry -->
+  <div class="hud-status">
+    <div>CORE: ONLINE</div>
+    <div>FREQ: 432.8 MHz</div>
+    <div>MODE: NEURAL LINK</div>
+  </div>
+
+  <!-- Bottom Left Controls Hint -->
+  <div class="hud-hint">
+    <div><span class="key">DRAG</span> ROTATE 3D &nbsp;&nbsp; <span class="key">SCROLL</span> ZOOM IN / OUT</div>
+    <div><span class="key">1-HAND PINCH</span> ROTATE &nbsp;&nbsp; <span class="key">2-HANDS PINCH ± SPREAD</span> ZOOM</div>
+  </div>
+
+  <!-- Bottom Right Gesture Control HUD -->
+  <div class="gesture-container">
+    <div class="camera-box" id="cameraBox">
+      <video id="cameraVideo" class="camera-video" playsinline muted></video>
+      <canvas id="cameraOverlay" class="camera-overlay" width="190" height="140"></canvas>
+      <div class="camera-badge" id="cameraBadge">STANDBY · SHOW HANDS</div>
+    </div>
+    <button id="toggleGestureBtn" class="gesture-toggle-btn">📷 ENABLE HAND GESTURES (G)</button>
+  </div>
+
+  <script>
+    // ——— SETUP THREE.JS SCENE ———
+    const container = document.getElementById('webgl-container');
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 500);
+    const HOME_POSITION = new THREE.Vector3(0, 0.4, 5.2);
+    camera.position.copy(HOME_POSITION);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    container.appendChild(renderer.domElement);
+
+    // ——— POST-PROCESSING: BLOOM + CYAN ABERRATION ———
+    const composer = new THREE.EffectComposer(renderer);
+    composer.addPass(new THREE.RenderPass(scene, camera));
+
+    const bloomPass = new THREE.UnrealBloomPass(
+      new THREE.Vector2(width, height),
+      1.75, // strength
+      0.45, // radius
+      0.18  // threshold
+    );
+    composer.addPass(bloomPass);
+
+    const JarvisBlueShader = {
+      uniforms: {
+        tDiffuse: { value: null },
+        uTime: { value: 0 },
+        uIntensity: { value: 0.0028 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform float uTime;
+        uniform float uIntensity;
+        varying vec2 vUv;
+        void main() {
+          vec2 dir = vUv - vec2(0.5);
+          float d = length(dir);
+          float offset = uIntensity * d;
+          float flicker = 1.0 + 0.015 * sin(uTime * 30.0) * sin(uTime * 7.3);
+          vec4 cr = texture2D(tDiffuse, vUv + dir * offset * 0.8);
+          vec4 cg = texture2D(tDiffuse, vUv);
+          vec4 cb = texture2D(tDiffuse, vUv - dir * offset * 1.2);
+          gl_FragColor = vec4(cr.r * 0.7, cg.g * 1.05, cb.b * 1.25, 1.0) * flicker;
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(0.65, 1.05, 1.35), 0.35);
+        }
+      `
+    };
+    const chromaticPass = new THREE.ShaderPass(JarvisBlueShader);
+    composer.addPass(chromaticPass);
+
+    // ——— ORBIT CONTROLS ———
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.minDistance = 0.8;
+    controls.maxDistance = 35;
+    controls.zoomSpeed = 1.3;
+    controls.enablePan = false;
+
+    // ——— JARVIS X1 BLUE PALETTE ———
+    const C_BRIGHT = 0x00f0ff; // electric cyan
+    const C_MID = 0x00a2ff;    // arc-reactor blue
+    const C_DIM = 0x0055aa;    // deep tech blue
+    const C_FAINT = 0x001a44;  // faint dark blue
+    const C_HOT = 0xd5f8ff;    // glowing white-cyan
+
+    const orbGroup = new THREE.Group();
+    scene.add(orbGroup);
+
+    function lineMat(color, opacity = 1) {
+      return new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+    }
+
+    function latRing(radius, lat, segs = 120) {
+      const r = radius * Math.cos(lat);
+      const y = radius * Math.sin(lat);
+      const pts = [];
+      for (let i = 0; i <= segs; i++) {
+        const a = (i / segs) * Math.PI * 2;
+        pts.push(new THREE.Vector3(r * Math.cos(a), y, r * Math.sin(a)));
+      }
+      return new THREE.BufferGeometry().setFromPoints(pts);
+    }
+
+    function meridian(radius, lon, segs = 120) {
+      const pts = [];
+      for (let i = 0; i <= segs; i++) {
+        const lat = (i / segs) * Math.PI - Math.PI / 2;
+        pts.push(
+          new THREE.Vector3(
+            radius * Math.cos(lat) * Math.cos(lon),
+            radius * Math.sin(lat),
+            radius * Math.cos(lat) * Math.sin(lon)
+          )
+        );
+      }
+      return new THREE.BufferGeometry().setFromPoints(pts);
+    }
+
+    // LAYER 1: OUTER WIREFRAME SHELL
+    const outerShell = new THREE.Group();
+    const R1 = 2.0;
+
+    for (let i = -15; i <= 15; i++) {
+      const lat = (i / 15) * (Math.PI / 2) * 0.95;
+      const opacity = i % 3 === 0 ? 0.5 : 0.12;
+      const color = i % 3 === 0 ? C_MID : C_FAINT;
+      outerShell.add(new THREE.Line(latRing(R1, lat), lineMat(color, opacity)));
+    }
+
+    for (let i = 0; i < 24; i++) {
+      const lon = (i / 24) * Math.PI * 2;
+      const isMajor = i % 6 === 0;
+      outerShell.add(
+        new THREE.Line(meridian(R1, lon), lineMat(isMajor ? C_MID : C_FAINT, isMajor ? 0.6 : 0.1))
+      );
+    }
+
+    const CROSS_LINES = 18;
+    const CROSS_SPREAD = 0.25;
+    for (let i = 0; i < 4; i++) {
+      const lon = (i / 4) * Math.PI * 2;
+      for (let j = 0; j < CROSS_LINES; j++) {
+        const t = (j / (CROSS_LINES - 1)) * 2 - 1;
+        const offset = (t * CROSS_SPREAD) / 2;
+        const falloff = 1 - Math.abs(t) * 0.7;
+        const opacity = 0.85 * falloff;
+        const color = Math.abs(t) < 0.3 ? C_BRIGHT : C_MID;
+        outerShell.add(new THREE.Line(meridian(R1, lon + offset, 200), lineMat(color, opacity)));
+      }
+    }
+
+    const EQ_LINES = 20;
+    const EQ_SPREAD = 0.35;
+    for (let j = 0; j < EQ_LINES; j++) {
+      const t = (j / (EQ_LINES - 1)) * 2 - 1;
+      const offset = (t * EQ_SPREAD) / 2;
+      const falloff = 1 - Math.abs(t) * 0.65;
+      const opacity = 0.8 * falloff;
+      const color = Math.abs(t) < 0.3 ? C_BRIGHT : C_MID;
+      outerShell.add(new THREE.Line(latRing(R1, offset, 200), lineMat(color, opacity)));
+    }
+    orbGroup.add(outerShell);
+
+    // LAYER 2: SECONDARY SHELL & ARCS
+    const shell2 = new THREE.Group();
+    const R2 = 2.12;
+
+    for (let i = 0; i < 16; i++) {
+      const lat = (Math.random() - 0.5) * Math.PI * 0.85;
+      const startLon = Math.random() * Math.PI * 2;
+      const arcLen = 0.3 + Math.random() * 1.2;
+      const pts = [];
+      const segs = 60;
+      const r = R2 * Math.cos(lat);
+      const y = R2 * Math.sin(lat);
+      for (let j = 0; j <= segs; j++) {
+        const a = startLon + (j / segs) * arcLen;
+        pts.push(new THREE.Vector3(r * Math.cos(a), y, r * Math.sin(a)));
+      }
+      shell2.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat(C_MID, 0.2 + Math.random() * 0.3)));
+    }
+    orbGroup.add(shell2);
+
+    // LAYER 3: INNER CORE SPIRAL
+    const innerCore = new THREE.Group();
+    const R3 = 0.9;
+
+    for (let s = 0; s < 8; s++) {
+      const pts = [];
+      const turns = 3 + Math.random() * 2;
+      const segs = 300;
+      const phase = (s / 8) * Math.PI * 2;
+      for (let i = 0; i <= segs; i++) {
+        const t = i / segs;
+        const lat = t * Math.PI - Math.PI / 2;
+        const lon = t * turns * Math.PI * 2 + phase;
+        pts.push(new THREE.Vector3(R3 * Math.cos(lat) * Math.cos(lon), R3 * Math.sin(lat), R3 * Math.cos(lat) * Math.sin(lon)));
+      }
+      innerCore.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat(C_BRIGHT, 0.3 + Math.random() * 0.2)));
+    }
+
+    for (let i = -6; i <= 6; i++) {
+      const lat = (i / 6) * (Math.PI / 2) * 0.9;
+      innerCore.add(new THREE.Line(latRing(R3, lat, 80), lineMat(C_DIM, 0.2)));
+    }
+    orbGroup.add(innerCore);
+
+    // LAYER 4: GLOWING ARC-REACTOR INNER CORE
+    const coreR = 0.25;
+    const icoGeo = new THREE.IcosahedronGeometry(coreR, 1);
+    const icoEdges = new THREE.EdgesGeometry(icoGeo);
+    const icoWireMat = lineMat(C_HOT, 0.9);
+    const icoWire = new THREE.LineSegments(icoEdges, icoWireMat);
+    orbGroup.add(icoWire);
+
+    const coreSphereMat = new THREE.MeshBasicMaterial({ color: C_HOT, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending });
+    const coreSphere = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 16), coreSphereMat);
+    orbGroup.add(coreSphere);
+
+    const glowSphereMat = new THREE.MeshBasicMaterial({ color: C_MID, transparent: true, opacity: 0.05, blending: THREE.AdditiveBlending });
+    const glowSphere = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 16), glowSphereMat);
+    orbGroup.add(glowSphere);
+
+    // FLOATING TELEMETRY CODE TEXT
+    const codeSnippets = [
+      "JARVIS", "MARK 42", "NEURAL.SYNC", "0x00FF88", "SYS.ONLINE",
+      "QUANTUM.CORE", "VOICE.RECOG", "TCP/8765", "SPEED_DIAL", "AI.READY",
+      "BUFFER.OK", "SECURE.LNK", "TELEMETRY", "MATRIX.INIT", "STREAM: LIVE",
+      "01101001", "10110100", "CORE.STABLE", "ARC.REACTOR", "100% READY"
+    ];
+
+    function makeTextSprite(text, size = 0.08) {
+      const c = document.createElement("canvas");
+      c.width = 256;
+      c.height = 32;
+      const ctx = c.getContext("2d");
+      ctx.font = "bold 14px 'Courier New', monospace";
+      const alpha = 0.4 + Math.random() * 0.5;
+      ctx.fillStyle = `rgba(${Math.floor(20 + Math.random() * 40)}, ${Math.floor(200 + Math.random() * 55)}, 255, ${alpha})`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, 128, 16);
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.minFilter = THREE.LinearFilter;
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+      s.scale.set(size * 5, size * 0.7, 1);
+      return s;
+    }
+
+    function scatterText(count, sizeFn, rFn, speedScale) {
+      const group = new THREE.Group();
+      for (let i = 0; i < count; i++) {
+        const sp = makeTextSprite(codeSnippets[Math.floor(Math.random() * codeSnippets.length)], sizeFn());
+        const phi = Math.acos(2 * Math.random() - 1);
+        const theta = Math.random() * Math.PI * 2;
+        const r = rFn();
+        sp.position.set(r * Math.sin(phi) * Math.cos(theta), r * Math.cos(phi), r * Math.sin(phi) * Math.sin(theta));
+        sp.userData = { phi, theta, r, speed: (speedScale[0] + Math.random() * speedScale[1]) * (Math.random() > 0.5 ? 1 : -1) };
+        group.add(sp);
+      }
+      return group;
+    }
+
+    const textOuter = scatterText(500, () => 0.04 + Math.random() * 0.03, () => R1 + 0.04 + Math.random() * 0.06, [0.0001, 0.0004]);
+    orbGroup.add(textOuter);
+
+    const textInner = scatterText(70, () => 0.03 + Math.random() * 0.02, () => R3 + 0.02, [0.0002, 0.0005]);
+    orbGroup.add(textInner);
+
+    // ORBITING DEBRIS / SATELLITES
+    const debrisGeos = [
+      new THREE.IcosahedronGeometry(0.012, 0),
+      new THREE.IcosahedronGeometry(0.02, 0),
+      new THREE.OctahedronGeometry(0.016, 0),
+      new THREE.TetrahedronGeometry(0.014, 0),
+    ];
+    const debris = [];
+    for (let i = 0; i < 180; i++) {
+      const geo = debrisGeos[Math.floor(Math.random() * debrisGeos.length)];
+      const mat = new THREE.MeshBasicMaterial({ color: Math.random() > 0.6 ? C_BRIGHT : C_MID, transparent: true, opacity: 0.35 + Math.random() * 0.55, blending: THREE.AdditiveBlending });
+      const mesh = new THREE.Mesh(geo, mat);
+      const orbitR = 1.3 + Math.random() * 3.8;
+      const speed = (0.04 + Math.random() * 0.25) * (Math.random() > 0.5 ? 1 : -1);
+      const tiltX = (Math.random() - 0.5) * Math.PI * 0.9;
+      const tiltZ = (Math.random() - 0.5) * Math.PI * 0.5;
+      const phase = Math.random() * Math.PI * 2;
+      mesh.userData = { orbitR, speed, tiltX, tiltZ, phase };
+      debris.push(mesh);
+      orbGroup.add(mesh);
+    }
+
+    // GLOWING CYAN DUST PARTICLES
+    const dustCount = 1800;
+    const dustPos = new Float32Array(dustCount * 3);
+    for (let i = 0; i < dustCount; i++) {
+      const rr = 0.6 + Math.pow(Math.random(), 0.6) * 6.5;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      dustPos[i * 3] = rr * Math.sin(phi) * Math.cos(theta);
+      dustPos[i * 3 + 1] = rr * Math.cos(phi);
+      dustPos[i * 3 + 2] = rr * Math.sin(phi) * Math.sin(theta);
+    }
+    const dustGeo = new THREE.BufferGeometry();
+    dustGeo.setAttribute("position", new THREE.Float32BufferAttribute(dustPos, 3));
+
+    const dotC = document.createElement("canvas");
+    dotC.width = dotC.height = 64;
+    const dCtx = dotC.getContext("2d");
+    const g = dCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, "rgba(0, 240, 255, 1)");
+    g.addColorStop(0.25, "rgba(0, 160, 255, 0.6)");
+    g.addColorStop(0.6, "rgba(0, 80, 200, 0.15)");
+    g.addColorStop(1, "rgba(0, 30, 100, 0)");
+    dCtx.fillStyle = g;
+    dCtx.fillRect(0, 0, 64, 64);
+
+    const dustMat = new THREE.PointsMaterial({
+      map: new THREE.CanvasTexture(dotC),
+      size: 0.042,
+      transparent: true,
+      opacity: 0.6,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+      color: C_BRIGHT,
+    });
+    const dustPoints = new THREE.Points(dustGeo, dustMat);
+    orbGroup.add(dustPoints);
+
+    // SCANNING RINGS
+    function makeScanRing(radius, thickness = 0.015) {
+      const geo = new THREE.RingGeometry(radius - thickness, radius + thickness, 120);
+      const mat = new THREE.MeshBasicMaterial({ color: C_BRIGHT, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = Math.PI / 2;
+      return mesh;
+    }
+    const scanRing1 = makeScanRing(R1, 0.01);
+    const scanRing2 = makeScanRing(R1 * 0.7, 0.008);
+    orbGroup.add(scanRing1, scanRing2);
+
+    // ——— CAMERA ROTATE & ZOOM HELPERS FOR HAND GESTURES ———
+    const sphericalScratch = new THREE.Spherical();
+    const offsetScratch = new THREE.Vector3();
+
+    function rotateBy(deltaTheta, deltaPhi) {
+      offsetScratch.copy(camera.position).sub(controls.target);
+      sphericalScratch.setFromVector3(offsetScratch);
+      sphericalScratch.theta -= deltaTheta;
+      sphericalScratch.phi = THREE.MathUtils.clamp(sphericalScratch.phi - deltaPhi, 0.05, Math.PI - 0.05);
+      sphericalScratch.makeSafe();
+      offsetScratch.setFromSpherical(sphericalScratch);
+      camera.position.copy(controls.target).add(offsetScratch);
+      camera.lookAt(controls.target);
+    }
+
+    function zoomBy(factor) {
+      offsetScratch.copy(camera.position).sub(controls.target);
+      const dist = THREE.MathUtils.clamp(offsetScratch.length() * factor, 0.8, 35);
+      offsetScratch.setLength(dist);
+      camera.position.copy(controls.target).add(offsetScratch);
+    }
+
+    // ——— JARVIS SPEAKING / LISTENING STATE (driven by jarvis.py over WebSocket) ———
+    // 0 = idle/silent, 1 = fully active. Lerped slowly each frame so the
+    // orb's reaction is smooth and gradual, never an abrupt jump.
+    let speakingTarget = 0;
+    let listeningTarget = 0, listeningLevel = 0, heardPulse = 0;
+    const captionEl = document.createElement("div");
+    captionEl.style.cssText = "position:fixed;left:50%;bottom:6%;transform:translateX(-50%);color:#7fe9ff;font:16px 'Courier New',monospace;letter-spacing:2px;text-shadow:0 0 10px #00cfff;z-index:50;pointer-events:none;transition:opacity .4s;opacity:0;max-width:80vw;text-align:center";
+    document.body.appendChild(captionEl);
+    let captionTimer;
+    function setCaption(t, fade) {
+      captionEl.textContent = t; captionEl.style.opacity = 1;
+      clearTimeout(captionTimer);
+      if (fade) captionTimer = setTimeout(() => { captionEl.style.opacity = 0; }, 3500);
+    }
+    let speakingLevel = 0;
+    const SPEAKING_LERP_SPEED = 0.035; // lower = slower, smoother transition
+
+    function connectSpeakingSocket() {
+      let ws;
+      try {
+        ws = new WebSocket("ws://localhost:8765");
+      } catch (e) {
+        setTimeout(connectSpeakingSocket, 4000);
+        return;
+      }
+      ws.onopen = () => {
+        try { ws.send(JSON.stringify({ type: "MOBILE_CLIENT_HELLO", device: "Jarvis UI (orb)" })); } catch (e) {}
+      };
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (!msg) return;
+          if (msg.type === "SPEAKING_STATE") {
+            speakingTarget = msg.speaking ? 1 : 0;
+          } else if (msg.type === "LISTENING") {
+            listeningTarget = 1; setCaption("Listening…", false);
+          } else if (msg.type === "PROCESSING") {
+            listeningTarget = 0.6; setCaption("Processing…", false);
+          } else if (msg.type === "HEARD") {
+            heardPulse = 1; listeningTarget = 0;
+            setCaption("“" + (msg.text || "") + "”", true);
+          }
+        } catch (e) {}
+      };
+      ws.onclose = () => setTimeout(connectSpeakingSocket, 4000);
+      ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    }
+    connectSpeakingSocket();
+
+    // ——— ANIMATION LOOP ———
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+
+      // Smoothly ease levels toward their targets every frame —
+      // this is what makes the pulse feel slow and smooth instead of snapping.
+      speakingLevel += (speakingTarget - speakingLevel) * SPEAKING_LERP_SPEED;
+      listeningLevel += (listeningTarget - listeningLevel) * 0.08;
+      heardPulse *= 0.96;
+      const react = Math.max(speakingLevel, listeningLevel * 0.45 + heardPulse);
+
+      // Slow, majestic rotation
+      outerShell.rotation.y += 0.0008;
+      outerShell.rotation.x = Math.sin(t * 0.05) * 0.03;
+
+      shell2.rotation.y -= 0.0006;
+      shell2.rotation.z = Math.sin(t * 0.06) * 0.02;
+
+      innerCore.rotation.y -= 0.0025;
+      innerCore.rotation.z += 0.0012;
+      innerCore.rotation.x = Math.cos(t * 0.05) * 0.04;
+
+      icoWire.rotation.x += 0.004;
+      icoWire.rotation.y += 0.006;
+
+      // Slow, calm breathing rhythm — amplitude and speed both rise gently
+      // while Jarvis is speaking or listening, staying slow and smooth.
+      const breathSpeed = 0.6 + react * 0.5;
+      const breathAmp = 0.06 + react * 0.16;
+      const gentleBreath = Math.sin(t * breathSpeed) * breathAmp;
+      const coreScale = 1 + gentleBreath;
+      coreSphere.scale.setScalar(coreScale);
+      glowSphere.scale.setScalar(1 + gentleBreath * 0.5);
+      icoWire.scale.setScalar(1 + gentleBreath * 0.4);
+
+      // Glow brightens smoothly while active
+      glowSphere.material.opacity = (glowSphere.material.userData.baseOpacity ?? (glowSphere.material.userData.baseOpacity = glowSphere.material.opacity)) + react * 0.25;
+
+      debris.forEach((d) => {
+        const u = d.userData;
+        const a = t * u.speed + u.phase;
+        d.position.set(
+          u.orbitR * Math.cos(a) * Math.cos(u.tiltX),
+          u.orbitR * Math.sin(u.tiltX) * Math.sin(a * 0.8) + Math.sin(a * 0.3 + u.tiltZ) * 0.2,
+          u.orbitR * Math.sin(a) * Math.cos(u.tiltZ)
+        );
+        d.rotation.x += 0.008;
+        d.rotation.z += 0.006;
+      });
+
+      [textOuter, textInner].forEach((group) => {
+        group.children.forEach((sp) => {
+          const u = sp.userData;
+          u.theta += u.speed;
+          sp.position.set(
+            u.r * Math.sin(u.phi) * Math.cos(u.theta),
+            u.r * Math.cos(u.phi),
+            u.r * Math.sin(u.phi) * Math.sin(u.theta)
+          );
+        });
+      });
+
+      const scanY1 = Math.sin(t * 0.2) * R1;
+      scanRing1.position.y = scanY1;
+      const scanS1 = Math.sqrt(Math.max(0, R1 * R1 - scanY1 * scanY1)) / R1;
+      scanRing1.scale.set(scanS1, scanS1, 1);
+      scanRing1.material.opacity = 0.2 * scanS1;
+
+      const scanY2 = Math.sin(t * 0.25 + 2) * R3;
+      scanRing2.position.y = scanY2;
+      const scanS2 = Math.sqrt(Math.max(0, R3 * R3 - scanY2 * scanY2)) / R3;
+      scanRing2.scale.set(scanS2, scanS2, 1);
+      scanRing2.material.opacity = 0.15 * scanS2;
+
+      dustPoints.rotation.y += 0.00015;
+      bloomPass.strength = 1.5 + Math.sin(t * 0.5) * 0.15 + react * 0.7;
+      chromaticPass.uniforms.uTime.value = t;
+
+      controls.update();
+      composer.render();
+    }
+
+    animate();
+
+    window.addEventListener("resize", () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+      composer.setSize(w, h);
+    });
+
+    // ——— WEBCAM HAND GESTURE TRACKING SYSTEM ———
+    let handLandmarker = null;
+    let cameraStream = null;
+    let gestureActive = false;
+    let lastVideoTime = -1;
+    let rafGestureId = 0;
+
+    const videoEl = document.getElementById("cameraVideo");
+    const canvasEl = document.getElementById("cameraOverlay");
+    const ctxOverlay = canvasEl.getContext("2d");
+    const cameraBox = document.getElementById("cameraBox");
+    const cameraBadge = document.getElementById("cameraBadge");
+    const toggleBtn = document.getElementById("toggleGestureBtn");
+
+    const PINCH_ON = 0.32;
+    const PINCH_OFF = 0.45;
+    const ROTATE_SPEED = 5.2;
+    const SMOOTHING = 0.45;
+
+    let prevSpinGrab = null;
+    let prevZoomDist = null;
+    let prevMode = "idle";
+    const handStates = new Map();
+
+    function dist2d(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    }
+
+    async function initMediaPipe() {
+      if (handLandmarker) return;
+      const WASM_CDN = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
+      const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+      
+      const fileset = await window.FilesetResolver.forVisionTasks(WASM_CDN);
+      handLandmarker = await window.HandLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
+        runningMode: "VIDEO",
+        numHands: 2,
+        minHandDetectionConfidence: 0.6,
+        minHandPresenceConfidence: 0.6,
+        minTrackingConfidence: 0.6,
+      });
+    }
+
+    async function startGestures() {
+      toggleBtn.innerText = "INITIALIZING CAMERA...";
+      try {
+        await initMediaPipe();
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: "user" },
+          audio: false
+        });
+        videoEl.srcObject = cameraStream;
+        await videoEl.play();
+
+        gestureActive = true;
+        cameraBox.classList.add("active");
+        toggleBtn.classList.add("active");
+        toggleBtn.innerText = "📷 GESTURES ACTIVE (PRESS G TO STOP)";
+        gestureLoop();
+      } catch (err) {
+        console.error("Gesture tracking error:", err);
+        toggleBtn.innerText = "CAMERA ACCESS FAILED";
+      }
+    }
+
+    function stopGestures() {
+      gestureActive = false;
+      cancelAnimationFrame(rafGestureId);
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+      }
+      videoEl.srcObject = null;
+      cameraBox.classList.remove("active");
+      toggleBtn.classList.remove("active");
+      toggleBtn.innerText = "📷 ENABLE HAND GESTURES (G)";
+      ctxOverlay.clearRect(0, 0, canvasEl.width, canvasEl.height);
+      cameraBadge.innerText = "STANDBY";
+    }
+
+    function gestureLoop() {
+      if (!gestureActive) return;
+      rafGestureId = requestAnimationFrame(gestureLoop);
+
+      if (!handLandmarker || videoEl.readyState < 2) return;
+      if (videoEl.currentTime === lastVideoTime) return;
+      lastVideoTime = videoEl.currentTime;
+
+      const result = handLandmarker.detectForVideo(videoEl, performance.now());
+      processHands(result.landmarks, (result.handedness || []).map(h => h[0]?.categoryName || "?"));
+      drawHandOverlay(result.landmarks);
+    }
+
+    function processHands(landmarks, labels) {
+      const pinchedGrabs = [];
+      const seen = new Set();
+
+      landmarks.forEach((lm, i) => {
+        const label = labels[i] || `hand_${i}`;
+        seen.add(label);
+
+        const handScale = dist2d(lm[0], lm[9]); // Wrist to Middle MCP
+        if (handScale < 1e-6) return;
+        const pinchRatio = dist2d(lm[4], lm[8]) / handScale; // Thumb tip to index tip
+
+        const raw = {
+          x: 1 - (lm[4].x + lm[8].x) / 2, // mirrored
+          y: (lm[4].y + lm[8].y) / 2,
+        };
+
+        let state = handStates.get(label);
+        if (!state) {
+          state = { pinching: false, grab: raw };
+          handStates.set(label, state);
+        }
+
+        if (state.pinching && pinchRatio > PINCH_OFF) state.pinching = false;
+        else if (!state.pinching && pinchRatio < PINCH_ON) state.pinching = true;
+
+        state.grab = {
+          x: state.grab.x + (raw.x - state.grab.x) * SMOOTHING,
+          y: state.grab.y + (raw.y - state.grab.y) * SMOOTHING,
+        };
+
+        if (state.pinching) pinchedGrabs.push(state.grab);
+      });
+
+      for (const k of handStates.keys()) {
+        if (!seen.has(k)) handStates.delete(k);
+      }
+
+      const mode = pinchedGrabs.length >= 2 ? "zoom" : pinchedGrabs.length === 1 ? "spin" : "idle";
+
+      if (mode !== prevMode) {
+        prevSpinGrab = null;
+        prevZoomDist = null;
+        prevMode = mode;
+      }
+
+      if (mode === "spin") {
+        const grab = pinchedGrabs[0];
+        if (prevSpinGrab) {
+          const dx = grab.x - prevSpinGrab.x;
+          const dy = grab.y - prevSpinGrab.y;
+          if (Math.abs(dx) > 1e-4 || Math.abs(dy) > 1e-4) {
+            rotateBy(dx * ROTATE_SPEED, dy * ROTATE_SPEED);
+          }
+        }
+        prevSpinGrab = grab;
+        cameraBadge.innerText = "🖐️ 1 HAND PINCHED · SPINNING 3D";
+      } else if (mode === "zoom") {
+        const currentDist = Math.hypot(
+          pinchedGrabs[0].x - pinchedGrabs[1].x,
+          pinchedGrabs[0].y - pinchedGrabs[1].y
+        );
+        if (prevZoomDist && prevZoomDist > 1e-4) {
+          const factor = prevZoomDist / currentDist;
+          if (Math.abs(factor - 1) > 0.005) {
+            zoomBy(factor);
+          }
+        }
+        prevZoomDist = currentDist;
+        cameraBadge.innerText = "👐 2 HANDS PINCHED · ZOOM IN/OUT";
+      } else {
+        cameraBadge.innerText = landmarks.length > 0 ? `${landmarks.length} HAND(S) DETECTED` : "SHOW HANDS TO CAMERA";
+      }
+    }
+
+    function drawHandOverlay(landmarks) {
+      ctxOverlay.clearRect(0, 0, canvasEl.width, canvasEl.height);
+      if (!landmarks || !landmarks.length) return;
+
+      const w = canvasEl.width;
+      const h = canvasEl.height;
+
+      ctxOverlay.strokeStyle = "rgba(0, 240, 255, 0.75)";
+      ctxOverlay.fillStyle = "#d5f8ff";
+      ctxOverlay.lineWidth = 1.5;
+
+      landmarks.forEach((lm) => {
+        // Draw bones
+        const CONNECTIONS = [
+          [0,1],[1,2],[2,3],[3,4],
+          [0,5],[5,6],[6,7],[7,8],
+          [5,9],[9,10],[10,11],[11,12],
+          [9,13],[13,14],[14,15],[15,16],
+          [13,17],[17,18],[18,19],[19,20],[0,17]
+        ];
+        CONNECTIONS.forEach(([i, j]) => {
+          ctxOverlay.beginPath();
+          ctxOverlay.moveTo((1 - lm[i].x) * w, lm[i].y * h);
+          ctxOverlay.lineTo((1 - lm[j].x) * w, lm[j].y * h);
+          ctxOverlay.stroke();
+        });
+
+        // Draw joints
+        lm.forEach((pt, idx) => {
+          ctxOverlay.beginPath();
+          const r = (idx === 4 || idx === 8) ? 3.5 : 2;
+          ctxOverlay.arc((1 - pt.x) * w, pt.y * h, r, 0, Math.PI * 2);
+          ctxOverlay.fill();
+        });
+      });
+    }
+
+    toggleBtn.addEventListener("click", () => {
+      if (gestureActive) stopGestures();
+      else startGestures();
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "g" || e.key === "G") {
+        if (gestureActive) stopGestures();
+        else startGestures();
+      }
+    });
+  </script>
+</body>
+</html>
