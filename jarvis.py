@@ -1,41 +1,21 @@
 #!/usr/bin/env python3
 """
-Desktop clap listener: reads the default microphone and logs when two loud transients
-(a double clap) are detected within a short time window.
+Jarvis: double-clap listener + voice assistant (Windows).
+
+Voice modes:
+  "hindi me baat karte hai" / "hindi mode"  -> Jarvis replies in Hindi
+  "english" / "english mode"                -> Jarvis replies in English
+  "stop"                                    -> stops music, speech, recording, timers
+                                               and closes all background apps
+                                               (CLOSE_ALL_PROCESSES). Jarvis keeps running.
+  "sleep"                                   -> shuts Jarvis itself down
 
 Run:
   python -m pip install -r requirements.txt
-  python clap_listen.py
+  python jarvis.py
 
-Tuning (constants below):
-  SAMPLE_RATE   — usually 44100 or 48000; match your device if needed.
-  BLOCK_MS      — analysis window size; smaller = snappier, noisier.
-  SPIKE_RATIO   — how many times louder than the noise floor counts as a clap;
-                    raise if false triggers; lower if claps are missed.
-  COOLDOWN_S    — minimum seconds between double-clap logs (debounce).
-  MIN_DOUBLE_GAP_S / MAX_DOUBLE_GAP_S — allowed time between the two claps.
-  RETRIGGER_RATIO — audio must fall below threshold * this before another hit counts.
-  NOISE_FLOOR_ALPHA — closer to 1 = slower baseline adaptation to room noise.
-  MIN_RMS       — ignore spikes below this absolute level (float audio ~ [-1, 1]).
-  SONG_URI      — Spotify or YouTube URL/URI to open on each double clap (empty = log only).
-  PLAY_SONG_ON_STARTUP — if True, play SONG_URI once immediately when the script starts.
-  FOCUS_EXISTING_CURSOR_ON_DOUBLE_CLAP — if True, launch Cursor without -n (reuse / focus existing instance).
-  OPEN_NEW_CURSOR_ON_DOUBLE_CLAP — if True, also launch Cursor with -n (extra new window; runs after focus launch if both).
-  CURSOR_OPEN_FULLSCREEN — Windows: after focus/launch, send F11 to enter Cursor/VS Code-style fullscreen (toggle off with F11).
-  OPEN_CLAUDE_CODE_IN_CHROME — Claude in Chrome after Spotify (CLAUDE_CODE_URL).
-  OPEN_BINANCE_BTC_IN_CHROME — Binance BTC trade page in Chrome (BINANCE_BTC_URL).
-  CLAUDE_CHROME_MONITOR / BINANCE_CHROME_MONITOR — 1-based display index (Windows: sorted left-to-top).
-  CHROME_SEPARATE_SITE_PROFILES — Windows: if True, uses temp --user-data-dir per site (not your normal profile).
-    Default False so Claude/Binance use your usual Chrome profile and logins; enable only if both windows keep
-    opening on the same monitor and you accept a separate profile for automation.
-  OPEN_CHROME_FULLSCREEN — Fullscreen on the chosen monitor (Windows: new window is detected and snapped with SetWindowPos).
-  JARVIS_WELCOME_* — TTS after the song (ElevenLabs). Configure via environment or a `.env`
-    file next to this script (ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, etc.).
-    With JARVIS_WELCOME_CACHE_ENABLED, audio is saved under `.cache/jarvis_welcome/` (WAV) and
-    replayed when phrase + voice + model + format match—no repeat API call. Delete that folder
-    or set JARVIS_WELCOME_CACHE_ENABLED=False to force a fresh fetch.
-  The welcome sequence runs only once per process. The assistant speaks in the background so Cursor
-    opens without waiting for playback to finish (restart the script to run again).
+Extra pip installs for the new features:
+  python -m pip install gTTS soundfile pywin32
 """
 
 from __future__ import annotations
@@ -45,6 +25,7 @@ import json
 import logging
 import operator
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -79,45 +60,33 @@ QUIET_GATE_MULT = 2.2  # update noise floor only when below floor * this
 INPUT_PROBE_S = 0.5
 INPUT_SILENT_RMS = 0.001
 
-# Spotify: "spotify:track:TRACK_ID" or https://open.spotify.com/track/...
-# NOTE: native "spotify:track:..." URIs autoplay far more reliably than the
-# https://open.spotify.com/track/... web link, which often just opens the
-# page without starting playback. Replace TRACK_ID below with your own song's
-# ID (get it via Spotify app -> "..." on the track -> Share -> hold Ctrl ->
-# "Copy Spotify URI"). Can also be a local file path (e.g. to an mp3 you downloaded).
+# Spotify URI / URL, or a local audio file path (mp3/wav/flac/ogg).
 SONG_URI = "C:\\letscode\\2025code\\jarvis-main\\mysong.mp3.mp3"
 
-# If True, play SONG_URI once immediately when the script starts (in addition to on double clap).
+# If True, play SONG_URI once immediately when the script starts.
 PLAY_SONG_ON_STARTUP = False
 
 # --- startup UI (particle sphere HTML) ---------------------------------
-# If True, opens JARVIS_UI_HTML_PATH in the default browser as soon as the script starts.
 JARVIS_UI_ENABLED = True
-# Path to the particle-sphere HTML visual. Default: "jarvis_ui.html" next to this script.
 JARVIS_UI_HTML_PATH = str(Path(__file__).resolve().parent / "jarvis_ui.html")
 
 # --- voice commands -----------------------------------------------------
-# If True, continuously listen for spoken commands ("open camera", "open folder",
-# "open youtube") using Google's free speech-to-text API (needs internet + `pip
-# install SpeechRecognition pyaudio`). Runs alongside the clap detector.
 VOICE_COMMANDS_ENABLED = True
-# Max seconds per spoken phrase before it's cut off and processed.
 VOICE_COMMAND_PHRASE_TIME_LIMIT = 4
-# Folder opened by "open folder" (default: this project's folder).
 VOICE_COMMAND_FOLDER_PATH = str(Path(__file__).resolve().parent)
-# URL opened by "open youtube".
 VOICE_COMMAND_YOUTUBE_URL = "https://www.youtube.com"
-# Wake word(s): saying any of these gets a spoken reply (needs ELEVENLABS_API_KEY/VOICE_ID).
 JARVIS_USER_NAME = "Dhananjay"
-WAKE_WORD_PHRASES = ["hello jarvis", "hey jarvis"," jarvis",]
+WAKE_WORD_PHRASES = ["hello jarvis", "hey jarvis", " jarvis"]
 WAKE_WORD_RESPONSE = f"Yes {JARVIS_USER_NAME} sir."
 
-# Saying any of these does the SAME thing as a double clap: starts the music
-# (SONG_URI) and the welcome flow. Covers likely mis-transcriptions of
-# "wake up buddy" too.
+# Speech-recognition language used while listening.
+#   "en-IN" understands Hinglish typed in English letters ("hindi me baat karte hai").
+#   Change HINDI_LISTEN_LANG to "hi-IN" if you want to speak pure Hindi in Hindi mode.
+ENGLISH_LISTEN_LANG = "en-IN"
+HINDI_LISTEN_LANG = "en-IN"
+
 WAKE_UP_MUSIC_PHRASES = ["wake up buddy", "wake up", "weycup buddy", "wake buddy"]
 
-# "who am i" / "what's my name" — spoken identity response.
 USER_IDENTITY_RESPONSE = (
     "Sir, you are Dhananjay Rajesh Sharma, a final-year B.Tech Computer Science "
     "student passionate about software development. You have completed multiple "
@@ -126,15 +95,13 @@ USER_IDENTITY_RESPONSE = (
     "user-friendly web applications."
 )
 
-# "sleep" — spoken farewell before Jarvis shuts itself down.
 SLEEP_RESPONSE = "Going to sleep, sir. Goodbye."
 
-# "close <app>" — maps a spoken app name to its process image name (Windows only).
-# Add more entries as needed. Unknown names are guessed as "<name>.exe".
+# "close <app>" -> process image name (Windows only).
 KNOWN_APP_PROCESSES = {
     "chrome": "chrome.exe",
     "browser": "chrome.exe",
-    "youtube": "chrome.exe",  # YouTube runs as a Chrome tab/window, so close it there.
+    "youtube": "chrome.exe",
     "notepad": "notepad.exe",
     "spotify": "Spotify.exe",
     "cursor": "Cursor.exe",
@@ -144,17 +111,12 @@ KNOWN_APP_PROCESSES = {
     "camera": "WindowsCamera.exe",
 }
 
-# "close all" / "close everything" — process names closed together (best-effort; a
-# process that isn't running is just skipped, no error).
+# "stop" / "close all" / "close everything" close these (missing ones are skipped).
 CLOSE_ALL_PROCESSES = ["chrome.exe", "WindowsCamera.exe", "Code.exe", "Spotify.exe", "Cursor.exe"]
 
-# "create a file named X on d drive" — default drive/extension used when not specified.
 CREATE_FILE_DEFAULT_DRIVE = "D:\\"
 CREATE_FILE_DEFAULT_EXTENSION = ".txt"
 
-# "where is <file>" / "find <file>" / "run <file>" — folders searched (in order) for a
-# name/filename match. Searched recursively, so keep this list to folders you actually
-# want scanned (a huge folder here will make lookups slow).
 FILE_SEARCH_ROOTS = [
     VOICE_COMMAND_FOLDER_PATH,
     str(Path.home() / "Desktop"),
@@ -163,9 +125,6 @@ FILE_SEARCH_ROOTS = [
     CREATE_FILE_DEFAULT_DRIVE,
 ]
 
-# "run <file>" — how to launch a found file, keyed by extension (lowercase, with dot).
-# Empty list = run the file directly (its own exe/bat/cmd). Add more entries (e.g.
-# ".ps1": ["powershell", "-File"]) as needed.
 RUN_FILE_INTERPRETERS = {
     ".py": [sys.executable],
     ".js": ["node"],
@@ -173,9 +132,6 @@ RUN_FILE_INTERPRETERS = {
     ".cmd": [],
 }
 
-# "open <anything>" — direct exe name / URI for well-known apps (checked first).
-# Anything not listed here falls back to a best-effort guess, then a Windows
-# Start Menu search by display name (see open_app_by_name()).
 KNOWN_APP_LAUNCH = {
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
@@ -193,30 +149,22 @@ KNOWN_APP_LAUNCH = {
     "spotify": "spotify:",
 }
 
-# "take a picture" / "start video recording" / "stop video recording" — uses OpenCV,
-# not the Windows Camera app, so it works headlessly. Override folders/index via .env:
-# JARVIS_CAMERA_INDEX, JARVIS_CAMERA_DIR, JARVIS_VIDEO_DIR.
 CAMERA_INDEX_DEFAULT = 0
 CAMERA_SAVE_DIR_DEFAULT = str(Path.home() / "Pictures" / "Jarvis")
 VIDEO_SAVE_DIR_DEFAULT = str(Path.home() / "Videos" / "Jarvis")
 VIDEO_FPS = 20.0
 
-# Cursor: focus existing instance (no -n). Set OPEN_NEW_CURSOR_ON_DOUBLE_CLAP for a new window as well.
 FOCUS_EXISTING_CURSOR_ON_DOUBLE_CLAP = False
 OPEN_NEW_CURSOR_ON_DOUBLE_CLAP = False
 CURSOR_OPEN_FULLSCREEN = False
 
-# VS Code: opens this folder in VS Code on double clap instead of any browser tab.
 OPEN_VSCODE_ON_DOUBLE_CLAP = False
 VSCODE_FOLDER_PATH = VOICE_COMMAND_FOLDER_PATH
 
-# Google Chrome (fallback: default browser). URLs overridable in .env.
 OPEN_CLAUDE_CODE_IN_CHROME = False
 OPEN_BINANCE_BTC_IN_CHROME = False
 OPEN_CHROME_FULLSCREEN = True
-# False = default Chrome profile (your normal user, extensions, cookies). True = temp dirs under %TEMP% per site.
 CHROME_SEPARATE_SITE_PROFILES = False
-# Which physical screen (1 = leftmost/top-first after sorting). Windows only; ignored elsewhere.
 CLAUDE_CHROME_MONITOR = 1
 BINANCE_CHROME_MONITOR = 3
 
@@ -228,9 +176,7 @@ JARVIS_WELCOME_PHRASE = (
     "anchors trust better than a polished deck sent cold a few days later."
     "can we start mark 42 project sir."
 )
-# Seconds after launching SONG_URI before speaking (gives Spotify/browser time to start).
 JARVIS_AFTER_SONG_DELAY_S = 1.0
-# Save ElevenLabs PCM as WAV under .cache/jarvis_welcome/; replay skips the API when the key matches.
 JARVIS_WELCOME_CACHE_ENABLED = True
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -243,6 +189,9 @@ logging.basicConfig(
 log = logging.getLogger("clap_listen")
 
 
+# =============================================================================
+# Audio input helpers
+# =============================================================================
 def block_samples() -> int:
     n = int(SAMPLE_RATE * BLOCK_MS / 1000)
     return max(n, 1)
@@ -375,6 +324,9 @@ def _choose_input_device(blocksize: int) -> int:
     return idx
 
 
+# =============================================================================
+# ElevenLabs + offline speech
+# =============================================================================
 def _elevenlabs_pcm_sample_rate(output_format: str) -> int:
     override = (os.environ.get("ELEVENLABS_PCM_SAMPLE_RATE") or "").strip()
     if override.isdigit():
@@ -454,47 +406,117 @@ def _save_pcm_wav_file(path: Path, pcm_bytes: bytes, sample_rate: int) -> None:
         raise
 
 
-def _speak_offline(text: str) -> bool:
-    """Fallback voice using the OS's built-in TTS (via pyttsx3) — no internet or
-    API key needed. Used whenever ElevenLabs is unavailable, out of credits, or
-    fails for any reason, so Jarvis still talks instead of going silent.
+# ---------------------------------------------------------------------------
+# Hindi / English mode state (used by the speech code below)
+# ---------------------------------------------------------------------------
+HINDI_MODE = False
+_hindi_cache: dict = {}
+_DEVANAGARI = re.compile(r"[\u0900-\u097F]")
 
-    IMPORTANT: each voice command runs in its own background thread, and on
-    Windows pyttsx3's SAPI5 driver needs COM initialized on *that* thread and
-    a fresh engine instance — reusing one engine across threads silently
-    produces no sound (no error either), so we do neither."""
+
+def _stt_language() -> str:
+    return HINDI_LISTEN_LANG if HINDI_MODE else ENGLISH_LISTEN_LANG
+
+
+def _translate_to_hindi(text: str) -> str:
+    """Free Google Translate endpoint (no key). Falls back to the original text."""
+    import urllib.request
+
+    url = (
+        "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=hi&dt=t&q="
+        + urllib.parse.quote(text)
+    )
     try:
-        import pyttsx3
+        req = urllib.request.Request(url, headers={"User-Agent": "jarvis-voice-assistant"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        out = "".join(part[0] for part in data[0] if part and part[0])
+        return out.strip() or text
+    except Exception as e:
+        log.warning("Hindi translation failed (%s); speaking English.", e)
+        return text
+
+
+def _maybe_hindi(text: str) -> str:
+    """In Hindi mode, turn Jarvis's English replies into Hindi before speaking."""
+    if not HINDI_MODE or _DEVANAGARI.search(text):
+        return text
+    if text not in _hindi_cache:
+        _hindi_cache[text] = _translate_to_hindi(text)
+    return _hindi_cache[text]
+
+
+def _speak_gtts(text: str, lang: str = "hi") -> bool:
+    """Free Hindi voice via Google TTS. Needs: python -m pip install gTTS soundfile"""
+    try:
+        import io
+        from gtts import gTTS
+        import soundfile as sf
     except ImportError:
-        log.warning(
-            "No voice output: ElevenLabs failed and pyttsx3 isn't installed "
-            "for the offline fallback. Run: python -m pip install pyttsx3"
-        )
+        log.warning("Hindi backup voice needs: python -m pip install gTTS soundfile")
         return False
-
-    com_initialized = False
     try:
-        import pythoncom  # part of pywin32, installed automatically with pyttsx3 on Windows
-        pythoncom.CoInitialize()
-        com_initialized = True
-    except ImportError:
-        pass  # not on Windows / pywin32 not present — pyttsx3 will use a different driver
-
-    try:
-        engine = pyttsx3.init()
-        engine.say(text)
-        engine.runAndWait()
-        engine.stop()
+        buf = io.BytesIO()
+        gTTS(text=text, lang=lang).write_to_fp(buf)
+        buf.seek(0)
+        data, rate = sf.read(buf, dtype="float32")
+        sd.play(data, rate)
+        sd.wait()
         return True
     except Exception as e:
-        log.warning("Offline speech fallback also failed: %s", e)
+        log.warning("gTTS speech failed: %s", e)
         return False
-    finally:
-        if com_initialized:
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
+
+
+def _speak_offline_powershell(text: str) -> bool:
+    """Offline voice using Windows' built-in speech (PowerShell). No pip install needed."""
+    if sys.platform != "win32":
+        return False
+    try:
+        env = dict(os.environ, JARVIS_TTS_TEXT=text)
+        subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "Add-Type -AssemblyName System.Speech; "
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                "$s.Speak($env:JARVIS_TTS_TEXT)",
+            ],
+            env=env,
+            timeout=90,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return True
+    except Exception as e:
+        log.warning("PowerShell speech fallback failed: %s", e)
+        return False
+
+
+_offline_lock = threading.Lock()
+
+
+def _speak_offline(text: str) -> bool:
+    """Backup voice (used when ElevenLabs fails). One reply speaks at a time.
+    Hindi text -> Google TTS; English -> Windows built-in speech."""
+    with _offline_lock:
+        if _DEVANAGARI.search(text) and _speak_gtts(text):
+            return True
+        try:
+            import pythoncom
+            import win32com.client
+        except ImportError:
+            return _speak_offline_powershell(text)
+        pythoncom.CoInitialize()
+        try:
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            speaker.Speak(text)
+            return True
+        except Exception as e:
+            log.warning("Offline speech fallback failed: %s", e)
+            return _speak_offline_powershell(text)
+        finally:
+            pythoncom.CoUninitialize()
 
 
 _speaking_lock = threading.Lock()
@@ -512,17 +534,23 @@ def _is_speaking() -> bool:
 
 
 def speak_text(text: str, *, use_cache: bool = True) -> None:
-    """Speak arbitrary text via ElevenLabs TTS, with the same WAV cache as the
-    welcome line. Falls back to offline OS speech (pyttsx3) if ElevenLabs is
-    unavailable, misconfigured, or fails (e.g. out of credits)."""
+    """Speak text via ElevenLabs (cached), falling back to offline speech.
+    In Hindi mode the text is translated to Hindi first."""
     text = text.strip()
     if not text:
         return
     _speaking_delta(+1)
     try:
-        _speak_text_impl(text, use_cache=use_cache)
+        _speak_text_impl(_maybe_hindi(text), use_cache=use_cache)
     finally:
         _speaking_delta(-1)
+
+
+def _say(text: str) -> None:
+    """Speak in a background thread so the listener never blocks."""
+    threading.Thread(
+        target=speak_text, args=(text,), kwargs={"use_cache": False}, daemon=True
+    ).start()
 
 
 def _speak_text_impl(text: str, *, use_cache: bool = True) -> None:
@@ -596,8 +624,11 @@ def announce_datetime() -> None:
     speak_text(phrase, use_cache=False)
 
 
+# =============================================================================
+# Music
+# =============================================================================
 def _play_local_audio_file(path: Path) -> None:
-    """Decode and play a local audio file via sounddevice, so it can be stopped with sd.stop()."""
+    """Decode and play a local audio file via sounddevice, so sd.stop() can stop it."""
     try:
         import soundfile as sf
     except ImportError:
@@ -651,6 +682,9 @@ def stop_song() -> None:
         log.warning("Could not stop playback: %s", e)
 
 
+# =============================================================================
+# Closing apps / STOP everything
+# =============================================================================
 def _close_foreground_window_win32() -> None:
     import ctypes
 
@@ -679,10 +713,11 @@ def _taskkill(exe: str) -> bool:
         return False
 
 
+_active_timers: list[threading.Timer] = []
+
+
 def close_all_known_apps() -> None:
-    """'close all' / 'close everything' — best-effort close of every app we know how to
-    close (Chrome/YouTube, Camera, VS Code, Spotify, Cursor). Also stops any playing
-    audio and any in-progress camera recording."""
+    """Stops audio + recording and closes every app in CLOSE_ALL_PROCESSES."""
     stop_song()
     if _video_state.get("stop_event") is not None:
         stop_video_recording()
@@ -697,10 +732,24 @@ def close_all_known_apps() -> None:
     speak_text("Closed everything, sir.", use_cache=False)
 
 
+def stop_everything() -> None:
+    """'stop': music/speech, video recording, timers, and all background apps.
+    Jarvis itself keeps running (say 'sleep' to shut Jarvis down)."""
+    for tm in list(_active_timers):
+        tm.cancel()
+    _active_timers.clear()
+    if sys.platform == "win32":
+        close_all_known_apps()
+    else:
+        stop_song()
+        if _video_state.get("stop_event") is not None:
+            stop_video_recording()
+    log.info("Stop command: everything stopped.")
+
+
 def close_app_or_window(target: str) -> None:
-    """Close a named app ('close chrome'), everything ('close all'), or with no name,
-    the active window ('close this')."""
-    target = target.strip().lower()
+    """'close chrome', 'close all', or 'close this' (active window)."""
+    target = re.sub(r"^(?:the|my|this|a|an)\s+", "", target.strip().lower())
     if sys.platform != "win32":
         log.warning("Voice-close is only wired up for Windows right now.")
         return
@@ -723,6 +772,9 @@ def close_app_or_window(target: str) -> None:
         speak_text(f"I couldn't close {target}, sir. It may not be running.", use_cache=False)
 
 
+# =============================================================================
+# Files / folders / YouTube / camera
+# =============================================================================
 def create_file_on_drive(filename: str, drive: str = CREATE_FILE_DEFAULT_DRIVE) -> None:
     filename = filename.strip().strip(".")
     if not filename:
@@ -740,6 +792,21 @@ def create_file_on_drive(filename: str, drive: str = CREATE_FILE_DEFAULT_DRIVE) 
     except OSError as e:
         log.warning("Could not create file %s: %s", path, e)
         speak_text("Sorry sir, I could not save that file.", use_cache=False)
+
+
+def create_folder_on_drive(name: str, drive: str = CREATE_FILE_DEFAULT_DRIVE) -> None:
+    name = name.strip().strip(".")
+    if not name:
+        speak_text("I didn't catch a folder name, sir. Cancelled.", use_cache=False)
+        return
+    path = Path(drive) / name
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        log.info("Created folder: %s", path)
+        speak_text(f"Folder {name} was created, sir.", use_cache=False)
+    except OSError as e:
+        log.warning("Could not create folder %s: %s", path, e)
+        speak_text("Sorry sir, I could not create that folder.", use_cache=False)
 
 
 def _youtube_search_first_video_id(query: str) -> str | None:
@@ -775,7 +842,6 @@ def search_and_play_youtube(query: str) -> None:
     if video_id:
         url = f"https://www.youtube.com/watch?v={video_id}&autoplay=1"
     else:
-        # Fallback: open search results page (user picks a video manually).
         url = "https://www.youtube.com/results?search_query=" + urllib.parse.quote(query)
     try:
         if sys.platform == "win32":
@@ -786,7 +852,10 @@ def search_and_play_youtube(query: str) -> None:
         if video_id:
             speak_text(f"Playing {query} on YouTube, sir.", use_cache=False)
         else:
-            speak_text(f"I couldn't find that exactly, sir, so I opened YouTube search for {query}.", use_cache=False)
+            speak_text(
+                f"I couldn't find that exactly, sir, so I opened YouTube search for {query}.",
+                use_cache=False,
+            )
     except OSError as e:
         log.warning("Could not open YouTube: %s", e)
         speak_text("Sorry sir, I couldn't open YouTube.", use_cache=False)
@@ -809,7 +878,6 @@ def open_voice_command_folder() -> None:
 def open_camera_app() -> None:
     try:
         if sys.platform == "win32":
-            # Launches the built-in Windows Camera app.
             os.startfile("microsoft.windows.camera:")
             log.info("Opened Camera app.")
             speak_text("Opening the camera, sir.", use_cache=False)
@@ -821,12 +889,8 @@ def open_camera_app() -> None:
         speak_text("Sorry sir, I couldn't open the camera.", use_cache=False)
 
 
-# --- "where is <file>" / "run <file>" / recent picture -----------------------------
-
-
 def find_file(name: str, *, max_results: int = 1) -> list[Path]:
-    """Best-effort search across FILE_SEARCH_ROOTS for a filename or name match.
-    Exact filename matches win; falls back to a substring match on the name."""
+    """Best-effort search across FILE_SEARCH_ROOTS for a filename or name match."""
     name = name.strip().strip(".")
     if not name:
         return []
@@ -940,8 +1004,7 @@ def open_recent_picture() -> None:
         log.warning("Could not open picture location %s: %s", latest, e)
 
 
-# --- camera: take a picture / record video (OpenCV, independent of the Camera app) -----
-
+# --- camera: take a picture / record video (OpenCV) -----------------------------
 _camera_lock = threading.Lock()
 _video_state: dict = {"writer": None, "cap": None, "stop_event": None, "thread": None, "path": None}
 
@@ -975,7 +1038,14 @@ def _open_camera_capture(cv2, index: int):
     return cap
 
 
+def _release_camera_app() -> None:
+    """The Windows Camera app locks the webcam, so close it before OpenCV uses it."""
+    if sys.platform == "win32" and _taskkill("WindowsCamera.exe"):
+        time.sleep(1.0)  # let Windows release the device
+
+
 def take_picture() -> None:
+    _release_camera_app()
     cv2 = _open_cv2()
     if cv2 is None:
         speak_text("Sorry sir, the camera isn't set up.", use_cache=False)
@@ -1004,6 +1074,7 @@ def take_picture() -> None:
 
 
 def start_video_recording() -> None:
+    _release_camera_app()
     cv2 = _open_cv2()
     if cv2 is None:
         speak_text("Sorry sir, the camera isn't set up.", use_cache=False)
@@ -1061,9 +1132,9 @@ def stop_video_recording() -> None:
     speak_text("Recording saved, sir.", use_cache=False)
 
 
-# --- generic "open <anything>" -------------------------------------------------------
-
-
+# =============================================================================
+# Generic "open <anything>"
+# =============================================================================
 def _win32_start_app_by_display_name(name: str) -> bool:
     """Best-effort: find an installed/Start Menu app by partial display name and launch it."""
     if sys.platform != "win32":
@@ -1095,8 +1166,6 @@ def _win32_start_app_by_display_name(name: str) -> bool:
 
 
 def open_app_by_name(name: str) -> None:
-    """Best-effort launcher for 'open <anything>' — checks KNOWN_APP_LAUNCH, then a few
-    generic guesses, then a Windows Start Menu search by display name."""
     name = name.strip()
     if not name:
         log.warning("No app name heard for the open command.")
@@ -1141,12 +1210,14 @@ def open_app_by_name(name: str) -> None:
     speak_text(f"Sorry sir, I couldn't find {name}.", use_cache=False)
 
 
+# =============================================================================
+# Knowledge: Wikipedia, location, distance, weather
+# =============================================================================
 def _wikipedia_summary(term: str) -> str | None:
-    """Best-effort short definition for 'what is X' style questions (no API key needed)."""
-    import json
     import urllib.request
 
-    url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(term)
+    host = "https://hi.wikipedia.org" if _DEVANAGARI.search(term) else "https://en.wikipedia.org"
+    url = host + "/api/rest_v1/page/summary/" + urllib.parse.quote(term)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "jarvis-voice-assistant"})
         with urllib.request.urlopen(req, timeout=6) as resp:
@@ -1158,10 +1229,7 @@ def _wikipedia_summary(term: str) -> str | None:
     return extract or None
 
 
-# --- location / distance / weather (no API key needed) --------------------
 def _get_ip_location() -> dict | None:
-    """Best-effort current location from the machine's public IP (no key needed)."""
-    import json
     import urllib.request
 
     try:
@@ -1174,7 +1242,7 @@ def _get_ip_location() -> dict | None:
         log.warning("IP location lookup failed: %s", e)
         return None
 
-    loc = data.get("loc")  # "lat,lon"
+    loc = data.get("loc")
     lat = lon = None
     if loc and "," in loc:
         try:
@@ -1193,9 +1261,6 @@ def _get_ip_location() -> dict | None:
 
 
 def _geocode(place: str) -> dict | None:
-    """Look up a place name -> {'name','lat','lon'} using Open-Meteo's free
-    geocoding API (no key needed)."""
-    import json
     import urllib.request
 
     url = "https://geocoding-api.open-meteo.com/v1/search?name=" + urllib.parse.quote(place) + "&count=1"
@@ -1226,7 +1291,7 @@ def _geocode(place: str) -> dict | None:
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     import math
 
-    r = 6371.0  # Earth radius, km
+    r = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
@@ -1235,8 +1300,6 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def speak_current_location() -> None:
-    """'where am I' / 'my location' / 'current location' — speaks city/region/country
-    from the machine's public IP."""
     loc = _get_ip_location()
     if not loc or not (loc.get("city") or loc.get("country")):
         speak_text("Sorry sir, I couldn't find your current location.", use_cache=False)
@@ -1246,8 +1309,6 @@ def speak_current_location() -> None:
 
 
 def speak_distance_between(term: str) -> None:
-    """'distance between X and Y' / 'how far is X from Y' etc. — geocodes both
-    places and speaks the straight-line distance."""
     term = term.strip()
     patterns = [
         r"^distance\s+(?:between|from)\s+(.+?)\s+(?:and|to)\s+(.+?)$",
@@ -1268,7 +1329,7 @@ def speak_distance_between(term: str) -> None:
 
     geo_a, geo_b = _geocode(place_a), _geocode(place_b)
     if not geo_a or not geo_b:
-        speak_text(f"Sorry sir, I couldn't find one of those places.", use_cache=False)
+        speak_text("Sorry sir, I couldn't find one of those places.", use_cache=False)
         return
 
     km = _haversine_km(geo_a["lat"], geo_a["lon"], geo_b["lat"], geo_b["lon"])
@@ -1281,10 +1342,6 @@ def speak_distance_between(term: str) -> None:
 
 
 def speak_temperature(place: str | None) -> None:
-    """'temperature today' / 'weather today' / 'temperature in X' — speaks the
-    current temperature and conditions using Open-Meteo (no key needed).
-    Falls back to the machine's IP-based location if no place was given."""
-    import json
     import urllib.request
 
     lat = lon = None
@@ -1314,8 +1371,7 @@ def speak_temperature(place: str | None) -> None:
         req = urllib.request.Request(url, headers={"User-Agent": "jarvis-voice-assistant"})
         with urllib.request.urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        current = data["current_weather"]
-        temp_c = current["temperature"]
+        temp_c = data["current_weather"]["temperature"]
     except Exception as e:
         log.warning("Weather lookup failed: %s", e)
         speak_text("Sorry sir, I couldn't get the temperature right now.", use_cache=False)
@@ -1325,32 +1381,27 @@ def speak_temperature(place: str | None) -> None:
     speak_text(f"It's currently {temp_c:.0f} degrees Celsius{where}, sir.", use_cache=False)
 
 
-# --- study material fallback (PDF / Word / images) ------------------------
-# Used when Wikipedia has no answer for a "what is / explain X" question:
-# searches every supported file in STUDY_MATERIAL_DIR (PDFs, .docx, and
-# images like .jpg/.png via OCR) instead.
+# =============================================================================
+# Study material fallback (PDF / Word / images)
+# =============================================================================
 STUDY_MATERIAL_DIR = Path(
     os.environ.get("JARVIS_STUDY_PDF_DIR")
     or os.environ.get("JARVIS_STUDY_MATERIAL_DIR")
     or (Path(__file__).resolve().parent / "study_pdfs")
 )
 STUDY_PDF_CACHE = str(Path(__file__).resolve().parent / ".cache" / "study_pdf_chunks.json")
-STUDY_ANSWER_MAX_WORDS = 70  # ~25 seconds of speech, enough to actually explain
+STUDY_ANSWER_MAX_WORDS = 70
 STUDY_STOPWORDS = {
     "what", "is", "the", "a", "an", "of", "in", "on", "to", "and",
     "explain", "define", "who", "are", "for", "with", "sir",
 }
 STUDY_FILE_EXTS = {".pdf", ".docx", ".txt", ".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
-# Files larger than this are skipped (with a warning) instead of indexed, so one
-# huge PDF can't stall startup or eat all your RAM. Override via env var if needed.
 STUDY_MAX_FILE_MB = float(os.environ.get("JARVIS_STUDY_MAX_FILE_MB", "25"))
 
 _study_chunks_cache: list[dict] | None = None
 
 
 def _group_into_chunks(paragraphs: list[str], page: int) -> list[dict]:
-    """Turn a list of raw paragraph strings into {'page','text'} dicts,
-    dropping tiny fragments (headers/page numbers/OCR noise)."""
     out = []
     for para in paragraphs:
         para = " ".join(para.split())
@@ -1414,15 +1465,10 @@ _STUDY_EXTRACTORS = {
 
 
 def _load_study_chunks() -> list[dict]:
-    """Load (and disk-cache) paragraph-sized chunks of text from every
-    supported file (PDF, .docx, image) in STUDY_MATERIAL_DIR. The cache is
-    keyed per-file (by name + mtime + size), so dropping a new file into the
-    folder only re-indexes that one file, not everything already indexed."""
     global _study_chunks_cache
     if _study_chunks_cache is not None:
         return _study_chunks_cache
 
-    import json
     cache_path = Path(STUDY_PDF_CACHE)
     cached_files: dict = {}
     if cache_path.exists():
@@ -1431,8 +1477,6 @@ def _load_study_chunks() -> list[dict]:
             if isinstance(loaded, dict):
                 cached_files = loaded
             else:
-                # Old cache format from before per-file caching (a flat list of
-                # chunks). Ignore it and rebuild fresh instead of crashing.
                 log.info("Old-format study cache found; rebuilding.")
                 cached_files = {}
         except Exception as e:
@@ -1492,7 +1536,7 @@ def _load_study_chunks() -> list[dict]:
                         file_path.name, lib_name,
                     )
                     warned_missing_libs.add(lib_name)
-                continue  # don't cache; retry next run once the lib is installed
+                continue
             except Exception as e:
                 log.warning("Could not read %s: %s", file_path.name, e)
                 continue
@@ -1502,7 +1546,6 @@ def _load_study_chunks() -> list[dict]:
         for c in file_chunks:
             all_chunks.append({"source": key, "page": c["page"], "text": c["text"]})
 
-    # Also drop cache entries for files that no longer exist in the folder.
     if set(cached_files.keys()) - set(updated_files.keys()):
         changed = True
 
@@ -1522,9 +1565,6 @@ def _load_study_chunks() -> list[dict]:
 
 
 def _search_study_pdf(term: str) -> str | None:
-    """Simple keyword-overlap search over chunks from every PDF in STUDY_PDF_DIR.
-    Returns the best-matching paragraph (from whichever PDF scores highest),
-    or None if nothing scores."""
     chunks = _load_study_chunks()
     if not chunks:
         return None
@@ -1548,8 +1588,6 @@ def _search_study_pdf(term: str) -> str | None:
 
 
 def _trim_to_speech_length(text: str, max_words: int = STUDY_ANSWER_MAX_WORDS) -> str:
-    """Trim text to roughly max_words (~15s of speech), ending on a sentence
-    boundary when possible instead of cutting mid-sentence."""
     words = text.split()
     if len(words) <= max_words:
         return text
@@ -1559,12 +1597,9 @@ def _trim_to_speech_length(text: str, max_words: int = STUDY_ANSWER_MAX_WORDS) -
 
 
 def answer_question_and_search(term: str) -> None:
-    """'what is X' / 'who is X' / 'define X' / 'explain X' — speaks an explanation.
-    Tries Wikipedia first; if that has nothing, searches your study material
-    (PDF/Word/image notes) instead; if NEITHER has anything relevant, it just
-    apologizes ("Sorry sir...") instead of opening a search. A search is only
-    opened in Chrome when an actual answer was found."""
+    """'what is X' etc. Wikipedia first, then study material, else an apology."""
     term = term.strip()
+    term = re.sub(r"^(?:the|a|an)\s+", "", term, flags=re.IGNORECASE)
     if not term:
         return
 
@@ -1572,7 +1607,7 @@ def answer_question_and_search(term: str) -> None:
 
     summary = _wikipedia_summary(term)
     if summary:
-        sentences = re.split(r"(?<=[.!?])\s+", summary)
+        sentences = re.split(r"(?<=[.!?।])\s+", summary)
         speak_text(" ".join(sentences[:3]).strip(), use_cache=False)
         found_answer = True
     else:
@@ -1604,14 +1639,14 @@ def open_youtube() -> None:
 
 
 def handle_sleep_command() -> None:
-    """'sleep' / 'go to sleep' — speaks a farewell and shuts Jarvis down."""
-    log.info("Sleep command received — shutting down Jarvis.")
+    """'sleep' / 'go to sleep': speaks a farewell and shuts Jarvis down."""
+    log.info("Sleep command received - shutting down Jarvis.")
     speak_text(SLEEP_RESPONSE, use_cache=False)
     time.sleep(0.3)
     os._exit(0)
 
 
-# "calculate 10 plus 10" / "calculate 10 + 10" — number OP number, spoken or symbolic.
+# --- calculator --------------------------------------------------------------
 _CALC_PATTERN = re.compile(
     r"(-?\d+(?:\.\d+)?)\s*"
     r"(\+|-|\*|/|x|plus|minus|times|multiplied by|multiply by|divided by|divide by)\s*"
@@ -1648,12 +1683,12 @@ def calculate_and_speak(t: str) -> None:
     try:
         a, b = float(a_str), float(b_str)
         result = _CALC_OP_FUNCS[op](a, b)
+    except ZeroDivisionError:
+        speak_text("Sorry sir, I can't divide by zero.", use_cache=False)
+        return
     except (ValueError, KeyError) as e:
         log.warning("Calculate command failed for %r: %s", t, e)
         speak_text("Sorry sir, I couldn't calculate that.", use_cache=False)
-        return
-    except ZeroDivisionError:
-        speak_text("Sorry sir, I can't divide by zero.", use_cache=False)
         return
     result_str = _format_calc_result(result)
     log.info("Calculated %s %s %s = %s", a_str, op, b_str, result_str)
@@ -1661,10 +1696,6 @@ def calculate_and_speak(t: str) -> None:
 
 
 def answer_from_study_material_fallback(text: str) -> bool:
-    """Last-resort fallback for a voice command that matched nothing else:
-    searches your study material (PDFs/.docx/images in STUDY_MATERIAL_DIR) for
-    anything relevant and speaks the best match. Returns True if it found and
-    spoke something, False if there was nothing relevant."""
     answer = _search_study_pdf(text)
     if not answer:
         return False
@@ -1673,6 +1704,9 @@ def answer_from_study_material_fallback(text: str) -> bool:
     return True
 
 
+# =============================================================================
+# Claude chat
+# =============================================================================
 CLAUDE_MODEL = (os.environ.get("JARVIS_CLAUDE_MODEL") or "claude-sonnet-4-6").strip()
 _chat_history: list[dict] = []
 
@@ -1692,6 +1726,7 @@ def ask_claude(question: str) -> str | None:
             f"You are Jarvis, a calm, witty voice assistant talking to {JARVIS_USER_NAME}. "
             "Reply in one to three short spoken sentences. No markdown, no lists. "
             "Say 'sir' occasionally."
+            + (" Always reply in Hindi, written in Devanagari script." if HINDI_MODE else "")
         ),
         "messages": _chat_history[-12:],
     }
@@ -1730,16 +1765,277 @@ def _study_fallback_or_log(text: str) -> None:
         )
 
 
+# =============================================================================
+# Hindi / English mode switching + Hindi command words
+# =============================================================================
+def _handle_mode_switch(text: str) -> bool:
+    """'hindi me baat karte hai' / 'hindi mode' -> Hindi replies.
+    'english' / 'english mode' / 'english me baat' -> English replies."""
+    global HINDI_MODE
+    t = text.lower().strip()
+
+    wants_hindi = (
+        re.search(r"hindi.*(?:ba+a?t|bol|mode|me+in?\b|mai?n\b)", t)
+        or re.search(r"हिंदी|हिन्दी", t)
+    ) and "play" not in t and "song" not in t
+    wants_english = (
+        re.match(r"^\W*(?:speak |talk |switch to |communicate in )?english\W*$", t)
+        or re.search(r"english\s*(?:mode|me+in?\s*ba+a?t|mai?n\s*ba+a?t)", t)
+        or re.search(r"इंग्लिश|अंग्रेजी|अंग्रेज़ी", t)
+    )
+
+    if wants_hindi:
+        if re.search(r"\b(?:off|disable|band)\b|बंद", t):
+            HINDI_MODE = False
+            _say("Okay boss, I will speak English now.")
+        else:
+            HINDI_MODE = True
+            _say("ठीक है बॉस, अब मैं हिंदी में बात करूँगा।")
+        log.info("Hindi mode: %s", "ON" if HINDI_MODE else "OFF")
+        return True
+    if wants_english:
+        HINDI_MODE = False
+        log.info("Hindi mode: OFF (English)")
+        _say("Okay boss, I will speak English now.")
+        return True
+    return False
+
+
+_STOP_RE = re.compile(
+    r"^\W*(?:(?:hey |hello )?jarvis\W*)?(?:st[eo]p|stop all|stop everything|ruko|ruk jao|"
+    r"sab band(?: karo)?|रुको|रुक जाओ|सब बंद(?: करो| कर दो)?)\W*$",
+    re.I,
+)
+
+_JARVIS_VARIANTS = re.compile(r"जार्विस|जारविस|जर्विस|जार्विज़|जार्विज|जरविस")
+_CAM = r"(?:कैमरा|कैमेरा|camera|kamera)"
+_V_OPEN = r"(?:खोलो|खोल दो|खोल|kholo|khol do|khol)"
+_V_PLAY = r"(?:चलाओ|चला दो|चला|बजाओ|बजा दो|chalao|chala do|bajao)"
+_APP_NAMES = {
+    "नोटपैड": "notepad", "क्रोम": "chrome", "कैलकुलेटर": "calculator",
+    "स्पॉटिफाई": "spotify", "पेंट": "paint", "सेटिंग्स": "settings",
+    "सेटिंग": "settings", "यूट्यूब": "youtube", "युट्यूब": "youtube",
+    "फोल्डर": "folder", "कैमरा": "camera", "कैमेरा": "camera",
+    "वीएस कोड": "vs code", "कंट्रोल पैनल": "control panel",
+}
+_HINDI_ALIASES = [
+    (r"^\s*(?:रुको|रुक जाओ|सब बंद(?: करो| कर दो)?|ruko|sab band(?: karo)?)\s*$", lambda m: "stop"),
+    (rf"{_CAM}.*(?:बंद|band)", lambda m: "close camera"),
+    (rf"{_CAM}.*{_V_OPEN}", lambda m: "open camera"),
+    (r"(?:फोटो|फ़ोटो|तस्वीर|photo|tasveer|picture|pic)\s*(?:खींचो|खींच|खीचो|लो|ले|kheencho|kheench|khicho|lo|le)\b",
+     lambda m: "take a picture"),
+    (r"(?:गाना|गाने|संगीत|म्यूजिक|music|gana|gaana|song).*(?:बंद|रोक|band|rok)",
+     lambda m: "stop the music"),
+    (rf"^\s*(?:यूट्यूब|युट्यूब|youtube)\s*(?:पर|par|pe)\s+(.+?)\s*{_V_PLAY}\s*$",
+     lambda m: f"play {m.group(1).strip()} on youtube"),
+    (rf"^\s*(.+?)\s+(?:यूट्यूब|युट्यूब|youtube)\s*(?:पर|par|pe)\s*{_V_PLAY}\s*$",
+     lambda m: f"play {m.group(1).strip()} on youtube"),
+    (rf"^\s*(.+?)\s*{_V_PLAY}\s*$", lambda m: f"play {m.group(1).strip()} on youtube"),
+    (r"(?:समय|टाइम|samay|बजे|baje|time\s*kya|kya\s*time)", lambda m: "what is the time"),
+    (r"(?:तारीख|तारिख|tareekh|tarikh)", lambda m: "what is the date"),
+    (r"(?:फोल्डर|फ़ोल्डर|folder).*(?:बना|banao|bana)", lambda m: "create a folder"),
+    (r"(?:फाइल|फ़ाइल|file).*(?:बना|banao|bana)", lambda m: "create a file"),
+    (r"(?:सो\s*जा(?:ओ)?|so\s*ja(?:o)?\b)", lambda m: "go to sleep"),
+    (r"(?:मौसम|mausam|तापमान|taapman)", lambda m: "weather today"),
+    (r"(?:मैं\s*कौन|मै\s*कौन|main\s*kaun|mai\s*kaun|मेरा\s*नाम)", lambda m: "who am i"),
+    (r"^\s*(.+?)\s*(?:के\s*बारे\s*में\s*बताओ|ke\s*bare\s*me(?:in)?\s*batao)\s*$",
+     lambda m: f"what is {m.group(1).strip()}"),
+    (r"^\s*(.+?)\s*(?:क्या\s*है|क्या\s*होता\s*है|kya\s*hai|kya\s*hota\s*hai)\s*[?।]?\s*$",
+     lambda m: f"what is {m.group(1).strip()}"),
+    (rf"^\s*(.+?)\s*{_V_OPEN}\s*(?:दो|do|karo|करो)?\s*$",
+     lambda m: "open " + _APP_NAMES.get(m.group(1).strip(), m.group(1).strip())),
+]
+
+
+def _hindi_to_command(text: str) -> str:
+    """Turn Hindi/Hinglish phrases into the English commands Jarvis knows.
+    Only active in Hindi mode or when the text contains Hindi letters."""
+    t = _JARVIS_VARIANTS.sub("jarvis", text).strip()
+    if not (HINDI_MODE or _DEVANAGARI.search(t)):
+        return t
+    body = re.sub(r"^\s*(?:hey|hello|ok|okay)?\s*jarvis[,.!]?\s*", "", t, flags=re.I)
+    for pattern, build in _HINDI_ALIASES:
+        m = re.search(pattern, body, re.I)
+        if m:
+            cmd = build(m)
+            log.info("Hindi/Hinglish command %r -> %r", text, cmd)
+            return cmd
+    return t
+
+
+# --- extra commands: volume, screenshot, timer, lock, google, jokes, tufani ---
+def _press_media_key(vk: int, times: int = 1) -> None:
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    for _ in range(times):
+        user32.keybd_event(vk, 0, 0, 0)
+        user32.keybd_event(vk, 0, 2, 0)
+
+
+def _take_screenshot() -> None:
+    try:
+        from PIL import ImageGrab
+    except ImportError:
+        speak_text("Sorry sir, screenshots need Pillow.", use_cache=False)
+        return
+    _, photo_dir, _ = _camera_env_config()
+    try:
+        photo_dir.mkdir(parents=True, exist_ok=True)
+        path = photo_dir / f"screenshot_{datetime.now():%Y%m%d_%H%M%S}.png"
+        try:
+            img = ImageGrab.grab(all_screens=True)
+        except TypeError:
+            img = ImageGrab.grab()
+        img.save(path)
+        log.info("Saved screenshot: %s", path)
+        speak_text("Screenshot saved, sir.", use_cache=False)
+    except Exception as e:
+        log.warning("Screenshot failed: %s", e)
+        speak_text("Sorry sir, I couldn't take a screenshot.", use_cache=False)
+
+
+_TIMER_RE = re.compile(
+    r"(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|सेकंड|सेकण्ड|मिनट|घंटे|घंटा)", re.I
+)
+
+
+def _start_timer(t: str) -> None:
+    m = _TIMER_RE.search(t)
+    if not m:
+        _say("For how long, sir? Say for example: set a timer for 5 minutes.")
+        return
+    amount = int(m.group(1))
+    unit = m.group(2).lower()
+    if unit.startswith(("sec", "सेक")):
+        seconds, label = amount, "seconds"
+    elif unit.startswith(("min", "मिन")):
+        seconds, label = amount * 60, "minutes"
+    else:
+        seconds, label = amount * 3600, "hours"
+    timer = threading.Timer(seconds, lambda: _say("Time is up, sir!"))
+    timer.daemon = True
+    timer.start()
+    _active_timers.append(timer)
+    log.info("Timer set for %d %s", amount, label)
+    _say(f"Timer set for {amount} {label}, sir.")
+
+
+def _lock_computer() -> None:
+    speak_text("Locking the computer, sir.", use_cache=False)
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.user32.LockWorkStation()
+
+
+def _tufani_mode() -> None:
+    speak_text(
+        "All systems at full power, boss. Tufani mode activated. Let's make some noise!",
+        use_cache=False,
+    )
+    play_song(SONG_URI)
+
+
+_JOKES_EN = [
+    "Why do programmers prefer dark mode? Because light attracts bugs.",
+    "There are only 10 kinds of people: those who understand binary and those who don't.",
+    "A SQL query walks into a bar, walks up to two tables and asks: can I join you?",
+]
+_BADHA = r"(?:ब[ढ\u095d]\u093c?ा|badha|up)"
+_VOL_UP = re.compile(
+    rf"(?:volume|आवाज़?|awaz|aawaz)\s*{_BADHA}|(?:increase|raise|turn up)\s+(?:the\s+)?volume|\blouder\b",
+    re.I,
+)
+_VOL_DOWN = re.compile(
+    r"(?:volume|आवाज़?|awaz|aawaz)\s*(?:कम|kam|down|घटा|ghata)"
+    r"|(?:decrease|lower|reduce|turn down)\s+(?:the\s+)?volume|\bquieter\b",
+    re.I,
+)
+
+
+def _handle_extra_commands(t: str) -> bool:
+    """Returns True if t was one of the extra commands (and runs it)."""
+    if re.search(r"tufani|toofani|tufaani|toofan|तूफानी|तूफ़ानी|तुफानी|तूफान", t):
+        threading.Thread(target=_tufani_mode, daemon=True).start()
+        return True
+
+    if re.search(r"kya\s*h[ae]l|क्या\s*हाल|kaise\s*ho|कैसे\s*हो|how are you", t):
+        _say("All systems at full power, boss. What's the plan?")
+        return True
+
+    if re.search(r"\bmute\b|\bunmute\b|म्यूट", t):
+        _press_media_key(0xAD)
+        _say("Done, sir.")
+        return True
+    if _VOL_UP.search(t):
+        _press_media_key(0xAF, 5)
+        _say("Volume up, sir.")
+        return True
+    if _VOL_DOWN.search(t):
+        _press_media_key(0xAE, 5)
+        _say("Volume down, sir.")
+        return True
+
+    if re.search(r"screen\s*shot|screenshot|स्क्रीन\s*शॉट|स्क्रीनशॉट", t):
+        threading.Thread(target=_take_screenshot, daemon=True).start()
+        return True
+
+    if re.search(r"\btimer\b|टाइमर|remind me", t):
+        _start_timer(t)
+        return True
+
+    if re.search(r"lock\s*(?:the\s*)?(?:computer|pc|laptop|screen|system)|कंप्यूटर\s*लॉक", t):
+        threading.Thread(target=_lock_computer, daemon=True).start()
+        return True
+
+    if "youtube" not in t:
+        m = (
+            re.match(r"^google\s+(?:for\s+)?(.+)$", t.strip())
+            or re.match(r"^search\s+(?:on\s+)?google\s+(?:for\s+)?(.+)$", t.strip())
+            or re.match(r"^search\s+(.+?)\s+on\s+google$", t.strip())
+        )
+        if m:
+            query = m.group(1).strip()
+            _open_url_in_chrome(
+                "https://www.google.com/search?q=" + urllib.parse.quote(query),
+                new_window=True,
+                label=f"google: {query}",
+            )
+            _say(f"Searching Google for {query}, sir.")
+            return True
+
+    if re.search(r"\bjoke\b|चुटकुला", t):
+        _say(random.choice(_JOKES_EN))  # translated automatically in Hindi mode
+        return True
+
+    return False
+
+
+# =============================================================================
+# Voice command router
+# =============================================================================
 def handle_voice_command(text: str) -> bool | tuple[str, str]:
     """Match spoken text to a command.
 
     Returns True if something was run, False if nothing matched, or
-    ("await_filename", drive) if a create-file command needs a spoken filename next.
+    ("await_filename"/"await_foldername", drive) if a name is needed next.
     """
     t = text.lower()
 
+    # "stop" -> stop everything running (checked first so nothing else grabs it)
+    if _STOP_RE.match(t.strip()):
+        threading.Thread(target=stop_everything, daemon=True).start()
+        return True
+
     # "hey jarvis <request>" -> handle <request>; bare "hey jarvis" -> reply "Yes sir".
-    m_wake = re.match(r"^\s*(?:hey|hello|ok|okay)?\s*jarvis[,.!]?\s*(.*)$", t)
+    m_wake = re.match(
+        r"^\s*(?:hey|hello|ok|okay)?\s*"
+        r"(?:jarvis|jealous|judges|xerox|travis|jervis|javis|garvis|jyada)\b[,.!]?\s*(.*)$",
+        t,
+    )
     if m_wake:
         rest = m_wake.group(1).strip()
         if not rest:
@@ -1751,16 +2047,17 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
             return True
         t = rest
         text = rest
+        if _STOP_RE.match(t.strip()):
+            threading.Thread(target=stop_everything, daemon=True).start()
+            return True
 
-    # "sleep" / "go to sleep" — closes Jarvis down entirely. Checked first so it
-    # always wins even if another keyword happens to appear in the same phrase.
+    if _handle_extra_commands(t):
+        return True
+
     if re.search(r"\bsleep\b", t):
         threading.Thread(target=handle_sleep_command, daemon=True).start()
         return True
 
-    # "who am i" / "what's my name" / "what is my name" — spoken identity reply.
-    # Checked before the generic question block below so it doesn't get treated
-    # as a generic "what is X" lookup.
     if re.search(r"\bwho\s+am\s+i\b", t) or re.search(r"\b(?:what'?s|what is)\s+my\s+name\b", t):
         threading.Thread(
             target=speak_text, args=(USER_IDENTITY_RESPONSE,),
@@ -1768,7 +2065,6 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
         ).start()
         return True
 
-    # "calculate 10 plus 10" / "calculate 10 + 10" / "compute 5 times 3"
     if "calculate" in t or "compute" in t:
         threading.Thread(target=calculate_and_speak, args=(t,), daemon=True).start()
         return True
@@ -1778,14 +2074,12 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
         return True
 
     if any(phrase in t for phrase in WAKE_UP_MUSIC_PHRASES):
-        log.info("Wake-up-buddy phrase heard — starting music + welcome flow (same as double clap).")
+        log.info("Wake-up-buddy phrase heard - starting music + welcome flow (same as double clap).")
         threading.Thread(target=run_double_clap_actions, daemon=True).start()
         return True
 
     if any(phrase in t for phrase in WAKE_WORD_PHRASES):
-        log.info("Wake word heard — stopping anything running and replying.")
-        # Barge-in: stop whatever audio (TTS or song) is currently playing so a
-        # fresh "jarvis" always interrupts and is ready for the next command.
+        log.info("Wake word heard - stopping anything running and replying.")
         try:
             sd.stop()
         except Exception:
@@ -1795,14 +2089,27 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
         ).start()
         return True
 
-    # "close chrome" / "close this" / "close window" — Windows only.
+    # "close chrome" / "close this" / "close window" - Windows only.
     if t.strip().startswith("close ") or t.strip() == "close":
-        target = t.strip()[len("close"):].strip()
+        target = re.sub(r"^(?:the|my|this|a|an)\s+", "", t.strip()[len("close"):].strip())
         close_app_or_window(target)
         return True
 
-    # "create a file named report on d drive" / "create file called notes" /
-    # "create a file on d drive" (no name given -> asks "What's the file name, sir?")
+    # "create a folder" / "make a new folder in d drive" / "create folder named X"
+    if ("create" in t or "make" in t) and "folder" in t:
+        drive = CREATE_FILE_DEFAULT_DRIVE
+        dm = re.search(r"\b([a-z])\s*drive\b", t)
+        if dm:
+            drive = f"{dm.group(1).upper()}:\\"
+        m = re.search(r"(?:named|name|called|call)\s+([a-z0-9_\-\.]+)", t)
+        if m:
+            threading.Thread(
+                target=create_folder_on_drive, args=(m.group(1), drive), daemon=True
+            ).start()
+            return True
+        return ("await_foldername", drive)
+
+    # "create a file named report on d drive"
     if ("create" in t or "make" in t) and "file" in t:
         drive = CREATE_FILE_DEFAULT_DRIVE
         dm = re.search(r"\b([a-z])\s*drive\b", t)
@@ -1814,10 +2121,9 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
                 target=create_file_on_drive, args=(m.group(1), drive), daemon=True
             ).start()
             return True
-        # No filename heard — ask for it instead of guessing from other words in the phrase.
         return ("await_filename", drive)
 
-    # "where is jarvis.py" / "find jarvis.py" / "locate report.txt" / "file location of X"
+    # "where is jarvis.py" / "find jarvis.py" / "locate report.txt"
     m_locate = re.match(
         r"^(?:jarvis[,]?\s*)?(?:where is|where's|wheres|find|locate|"
         r"(?:file\s+)?location of)\s+(?:the\s+|my\s+)?(?:file\s+)?([\w\-. ]+?)"
@@ -1832,8 +2138,7 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
             ).start()
             return True
 
-    # "run jarvis.py" / "run the file jarvis.py" / "open jarvis.py and run it" —
-    # finds the file, opens it in VS Code, and runs it in a new console window.
+    # "run jarvis.py" / "open jarvis.py and run it"
     m_run = re.search(r"\b(?:run|execute)\s+(?:the\s+)?(?:file\s+)?([\w\-.]+)", t)
     if not m_run:
         m_run = re.search(r"\bopen\s+([\w\-.]+)\b.*\brun\b", t)
@@ -1845,7 +2150,7 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
             ).start()
             return True
 
-    # "show me my recent picture" / "open my last photo" / "latest picture"
+    # "show me my recent picture"
     if ("picture" in t or "photo" in t or "image" in t) and (
         "recent" in t or "last" in t or "latest" in t
     ):
@@ -1857,7 +2162,7 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
         threading.Thread(target=take_picture, daemon=True).start()
         return True
 
-    # "start video recording" / "start recording" / "stop video recording" / "stop recording"
+    # "start video recording" / "stop recording"
     if "recording" in t or ("video" in t and ("start" in t or "record" in t)):
         if "stop" in t:
             threading.Thread(target=stop_video_recording, daemon=True).start()
@@ -1868,7 +2173,7 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
     # "search youtube for shape of you" / "play shape of you on youtube"
     if "youtube" in t and ("search" in t or "play" in t):
         query = t
-        for word in ("search", "on youtube", "youtube", "play", "for"):
+        for word in ("search", "on youtube", "youtube", "playing", "play", "just", "open", "for"):
             query = query.replace(word, " ")
         query = " ".join(query.split()).strip()
         threading.Thread(
@@ -1880,19 +2185,14 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
         threading.Thread(target=announce_datetime, daemon=True).start()
         return True
 
-    # "where am I" / "my location" / "current location" — IP-based location.
     if re.search(r"where am i|my (?:current )?location|current location", t):
         threading.Thread(target=speak_current_location, daemon=True).start()
         return True
 
-    # "distance between X and Y" / "how far is X from Y" / "how far from X to Y" /
-    # "X to Y distance" — checked before the generic question block below.
     if "distance" in t or "how far" in t:
         threading.Thread(target=speak_distance_between, args=(t,), daemon=True).start()
         return True
 
-    # "temperature today" / "what's the temperature" / "weather today" /
-    # "temperature in <place>" / "weather in <place>".
     m_weather = re.search(
         r"(?:temperature|weather)(?:\s+(?:today|now|currently))?"
         r"(?:\s+(?:in|at|for)\s+(.+))?$",
@@ -1903,11 +2203,6 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
         threading.Thread(target=speak_temperature, args=(place,), daemon=True).start()
         return True
 
-    # "what is X" / "what's X" / "who is X" / "define X" / "explain X" / "tell me about X" /
-    # "how many/does/is X" / "why X" / "when X" / "where X" / "list X" / "name the X" /
-    # "give me X" / "mention X" — speaks an explanation and opens a Chrome search for it.
-    # Skipped for "what's the date/time" so the dedicated date/time handler above still
-    # owns those.
     m_question = re.match(
         r"^(?:jarvis[,]?\s*)?(?:what is|what's|whats|who is|who's|whos|define|"
         r"explain|tell me about|what are|how many|how does|how do|how is|why|"
@@ -1934,8 +2229,7 @@ def handle_voice_command(text: str) -> bool | tuple[str, str]:
         open_youtube()
         return True
 
-    # Generic fallback: "open <anything>" — checked last so the specific cases above
-    # (camera, folder, youtube, etc.) still take priority.
+    # Generic fallback: "open <anything>"
     m_open = re.search(r"\bopen\s+(.+)$", t.strip())
     if m_open:
         app_name = m_open.group(1).strip()
@@ -1989,15 +2283,12 @@ def voice_command_listener() -> None:
         return
 
     log.info(
-        "Voice commands ready — try \"open <anything>\", \"run <file>\", \"where is <file>\", "
-        "\"open camera\", \"take a picture\", \"recent picture\", "
-        "\"start/stop video recording\", \"create a file on d drive\", \"open folder\", "
-        "\"open youtube\", \"what's the date\", \"stop the music\", \"who am I\", "
-        "\"calculate <a> <op> <b>\", or \"sleep\" to shut Jarvis down. Anything else is "
-        "searched against your study material (STUDY_MATERIAL_DIR) before giving up."
+        "Voice commands ready - say \"hindi me baat karte hai\" for Hindi, \"english\" for English, "
+        "\"stop\" to stop everything, or \"sleep\" to shut Jarvis down."
     )
 
     awaiting_filename_drive: str | None = None
+    awaiting_kind = "file"
 
     while True:
         try:
@@ -2008,7 +2299,7 @@ def voice_command_listener() -> None:
                 audio = recognizer.listen(
                     source, phrase_time_limit=VOICE_COMMAND_PHRASE_TIME_LIMIT
                 )
-            text = recognizer.recognize_google(audio)
+            text = recognizer.recognize_google(audio, language=_stt_language())
             log.info("Heard: %r", text)
 
             if awaiting_filename_drive is not None:
@@ -2017,19 +2308,28 @@ def voice_command_listener() -> None:
                 filename = text.strip()
                 if filename:
                     threading.Thread(
-                        target=create_file_on_drive, args=(filename, drive), daemon=True
+                        target=(create_folder_on_drive if awaiting_kind == "folder" else create_file_on_drive),
+                        args=(filename, drive),
+                        daemon=True,
                     ).start()
                 else:
-                    log.info("No filename heard — cancelling create-file command.")
+                    log.info("No name heard - cancelling create command.")
                 continue
 
+            # Hindi / English mode switch
+            if _handle_mode_switch(text):
+                continue
+            text = _hindi_to_command(text)
+
             result = handle_voice_command(text)
-            if isinstance(result, tuple) and result[0] == "await_filename":
+            if isinstance(result, tuple) and result[0] in ("await_filename", "await_foldername"):
+                awaiting_kind = "folder" if result[0] == "await_foldername" else "file"
                 awaiting_filename_drive = result[1]
-                speak_text("What's the file name, sir?")
+                speak_text(
+                    "What's the folder name, sir?" if awaiting_kind == "folder"
+                    else "What's the file name, sir?"
+                )
             elif not result:
-                # No built-in command matched — try answering from study material
-                # (PDFs/.docx/images in STUDY_MATERIAL_DIR) before giving up.
                 threading.Thread(
                     target=_study_fallback_or_log, args=(text,), daemon=True
                 ).start()
@@ -2043,6 +2343,9 @@ def voice_command_listener() -> None:
             time.sleep(1.0)
 
 
+# =============================================================================
+# Chrome / Cursor / VS Code window helpers
+# =============================================================================
 def _chrome_executable() -> str | None:
     if sys.platform == "win32":
         for base in (
@@ -2093,13 +2396,11 @@ def _win32_sorted_monitor_rects() -> list[tuple[int, int, int, int]]:
 
 
 def _chrome_monitor_top_left(one_based_index: int) -> tuple[int, int]:
-    """Top-left corner on virtual desktop for monitor N (1-based)."""
     l, t, _, _ = _chrome_monitor_bounds(one_based_index)
     return (l, t)
 
 
 def _chrome_monitor_bounds(one_based_index: int) -> tuple[int, int, int, int]:
-    """Monitor N as (left, top, right, bottom), 1-based index (sorted like other Chrome helpers)."""
     rects = _win32_sorted_monitor_rects()
     if not rects:
         return (0, 0, 1920, 1080)
@@ -2354,8 +2655,6 @@ def open_claude_in_chrome() -> None:
             user_data = _chrome_site_user_data_dir("claude")
     elif not fs:
         size = _chrome_window_size()
-    else:
-        size = None
     _open_url_in_chrome(
         url,
         new_window=True,
@@ -2391,8 +2690,6 @@ def open_binance_btc_in_chrome() -> None:
             user_data = _chrome_site_user_data_dir("binance")
     elif not fs:
         size = _chrome_window_size()
-    else:
-        size = None
     _open_url_in_chrome(
         url,
         new_window=True,
@@ -2473,7 +2770,6 @@ def _cursor_largest_main_hwnd_win32() -> int | None:
 
 def _cursor_foreground_hwnd_win32(hwnd: int) -> None:
     import ctypes
-    from ctypes import wintypes
 
     user32 = ctypes.windll.user32
     SW_RESTORE = 9
@@ -2489,9 +2785,7 @@ def _cursor_foreground_hwnd_win32(hwnd: int) -> None:
 
 
 def _cursor_send_f11_fullscreen_win32(hwnd: int) -> None:
-    """F11 toggles Zen/fullscreen in Cursor (Electron)."""
     import ctypes
-    from ctypes import wintypes
 
     user32 = ctypes.windll.user32
     KEYEVENTF_KEYUP = 0x0002
@@ -2502,7 +2796,6 @@ def _cursor_send_f11_fullscreen_win32(hwnd: int) -> None:
 
 
 def _focus_existing_cursor_window_win32() -> bool:
-    """Bring an existing Cursor.exe main window to the foreground (no new process)."""
     if sys.platform != "win32":
         return False
     hwnd = _cursor_largest_main_hwnd_win32()
@@ -2556,7 +2849,7 @@ def open_jarvis_ui() -> None:
     ui_path = Path(JARVIS_UI_HTML_PATH)
     if not ui_path.is_file():
         log.warning(
-            "Jarvis UI file not found at %s — skipping (JARVIS_UI_ENABLED=True but "
+            "Jarvis UI file not found at %s - skipping (JARVIS_UI_ENABLED=True but "
             "the HTML file is missing; place jarvis_ui.html next to jarvis.py or "
             "update JARVIS_UI_HTML_PATH).",
             ui_path,
@@ -2617,6 +2910,9 @@ def open_cursor_window() -> None:
             log.warning("Cursor fullscreen: no Cursor window found to send F11.")
 
 
+# =============================================================================
+# Main: double-clap detector
+# =============================================================================
 def main() -> int:
     blocksize = block_samples()
     noise_floor = 1e-4
@@ -2626,7 +2922,7 @@ def main() -> int:
     welcome_sequence_done = False
 
     log.info(
-        "Listening (double clap: %.2f–%.2fs apart, rate=%d, block=%d ms, "
+        "Listening (double clap: %.2f-%.2fs apart, rate=%d, block=%d ms, "
         "spike_ratio=%.1f, cooldown=%.2fs). Ctrl+C to stop.",
         MIN_DOUBLE_GAP_S,
         MAX_DOUBLE_GAP_S,
@@ -2640,7 +2936,7 @@ def main() -> int:
     if SONG_URI.strip():
         log.info("Double clap opens this track: %s", SONG_URI.strip())
     else:
-        log.info("SONG_URI is empty — set it to play one song on each double clap.")
+        log.info("SONG_URI is empty - set it to play one song on each double clap.")
     if PLAY_SONG_ON_STARTUP and SONG_URI.strip():
         log.info("Playing startup song: %s", SONG_URI.strip())
         play_song(SONG_URI)
@@ -2738,7 +3034,7 @@ def main() -> int:
                                 welcome_sequence_done = True
                                 log.info(
                                     "Double clap detected (gap=%.3fs, rms=%.5f, "
-                                    "noise_floor=%.5f, threshold=%.5f) — running welcome once",
+                                    "noise_floor=%.5f, threshold=%.5f) - running welcome once",
                                     gap,
                                     level,
                                     noise_floor,
