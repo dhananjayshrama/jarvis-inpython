@@ -1,2 +1,5 @@
 .env
+.cache/jarvis_backup*.py
+.env
 .cache/
+__pycache__/
