@@ -141,3 +141,4 @@ Edit the constants at the top of `jarvis.py`:
 - **No reaction to claps:** Lower `SPIKE_RATIO` slightly or speak/clap closer to the mic.
 - **Spam logs:** Raise `SPIKE_RATIO` or `COOLDOWN_S`.
 - **No welcome speech:** Set `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` in `.env` and restart the terminal so variables load.
+"# jarvis-inpython" 
