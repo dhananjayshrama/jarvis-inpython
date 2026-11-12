@@ -3,3 +3,4 @@
 .env
 .cache/
 __pycache__/
+study_pdfs/
